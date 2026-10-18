@@ -103,5 +103,27 @@ SDK 自身的 `TYPESAFE_BASE_URL` 和 `TYPESAFE_DEFAULT_MODEL` 仍可用；配�
 - [TypeSafe JavaScript SDK](https://docs.typesafe.ai/sdk/javascript)
 - [Noul 概率语义](https://docs.typesafe.ai/primitives/noul)
 
-目前已接通真实 SDK 和 Pi provider 边界的离线测试。线上召回率、误命中率、
-费用、缓存和 p50/p95 延迟需要另行运行真实目录评测，不能从模拟测试推断。
+## 评测与分发
+
+`npm run verify:package` 构建并生成 `outputs/jev-skill-router-0.1.0.tgz`，
+检查包内文件，并用真正的 Pi loader 加载打包后的 ESM 入口。不调用线上 API。
+`dist/`、tarball 和本地报告均不进入 Git；npm 包仅包含构建产物和交付文档。
+
+```powershell
+npm run eval
+npm run eval -- --live --output outputs/evaluation.json
+```
+
+第一条只预览 8 个合成 metadata 用例，不联网。第二条使用环境中的 Jev key
+运行至多 8 次真实请求，每次默认 3 秒且不重试；遇到永久 HTTP 4xx 提前停止。
+任何回退使评测返回非零退出码。报告按请求逐次保存，支持 `--repeat 1..20`、
+`--model`、`--threshold` 和 `--timeout-ms`，可用于比较阈值或重复采样。
+
+报告记录必需技能召回、误选、零命中、实际模型、token usage 和 p50/p95。
+不把全量回退当成命中；费用、缓存、任务完成率缺少证据时标为 `null`。
+同时提供 `--input-usd-per-million`、`--output-usd-per-million` 且 usage
+完整时，可得到基于操作者输入价格的费用估算。
+
+**2026-10-18 实测状态：** 本地功能检查与打包加载已验证；真实服务返回
+HTTP 451，尚未获得有效 Jev 回答。因此线上模型校准、真实目录召回、任务
+完成率、缓存和正常请求延迟仍待验收。[完整记录](docs/verification.md)。

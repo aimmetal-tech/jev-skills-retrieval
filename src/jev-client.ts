@@ -22,6 +22,7 @@ export class RoutingFailure extends Error {
   constructor(
     readonly code: FailureCode,
     message: string,
+    readonly httpStatus?: number,
   ) {
     super(message);
   }
@@ -147,17 +148,25 @@ export function createJevEvaluator(
           throw new RoutingFailure(
             "authentication",
             `Jev authentication failed (HTTP ${error.status}).`,
+            error.status,
           );
         if (error.status === 429)
           throw new RoutingFailure(
             "rate_limit",
             "Jev rate limit reached (HTTP 429).",
+            error.status,
           );
         if ([400, 413, 422].includes(error.status))
           throw new RoutingFailure(
             "input_limit",
             `Jev rejected the input (HTTP ${error.status}); current requirements were not truncated.`,
+            error.status,
           );
+        throw new RoutingFailure(
+          "service_error",
+          `Jev service request failed (HTTP ${error.status}).`,
+          error.status,
+        );
       }
       throw new RoutingFailure(
         "service_error",

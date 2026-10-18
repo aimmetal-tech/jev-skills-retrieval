@@ -4,13 +4,21 @@
   "description": "Per-request Jev skill routing for the Pi coding agent",
   "type": "module",
   "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "skills",
+    "jev",
+    "routing"
+  ],
   "engines": {
     "node": ">=22.19.0"
   },
   "files": [
     "dist",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "docs"
   ],
   "exports": {
     ".": "./dist/pi-adapter.js"
@@ -26,6 +34,8 @@
     "lint": "biome check .",
     "format": "biome check --write .",
     "test": "tsx --test tests/*.test.ts",
+    "eval": "tsx eval/run.ts",
+    "verify:package": "tsx scripts/verify-package.ts",
     "check": "npm run typecheck && npm run lint && npm test && npm run build",
     "prepack": "npm run build"
   },

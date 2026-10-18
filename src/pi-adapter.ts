@@ -76,6 +76,16 @@ export function createSkillRouterExtension(
       historyLimit = loaded.config.historyMaxTurns;
       const pinned = pinnedSkills(catalog, loaded.config.pinnedSkillPaths);
       const issues = [...loaded.issues, ...pinned.issues];
+      const tools = event.systemPromptOptions.selectedTools;
+      const hidden = event.systemPromptOptions.hiddenTools;
+      const reader =
+        tools.includes("read") && !hidden.includes("read")
+          ? "read"
+          : tools.includes("bash") && !hidden.includes("bash")
+            ? "bash"
+            : tools.includes("read") || tools.includes("bash")
+              ? "indirect"
+              : undefined;
       // Fixed baseline is written before remote work. Errors explicitly restore the catalog.
       event.systemPromptOptions.skills = pinned.skills;
       const result = await route(
@@ -92,6 +102,7 @@ export function createSkillRouterExtension(
           config: loaded.config,
           signal: ctx.signal,
           issues,
+          ...(reader ? { fileReadTool: reader } : {}),
         },
         evaluate,
       );
@@ -99,12 +110,6 @@ export function createSkillRouterExtension(
       event.systemPromptOptions.skills = result.skills;
       previous = result.skills;
       current = { user: inputText, assistant: "" };
-      const tools = event.systemPromptOptions.selectedTools;
-      const reader = tools.includes("read")
-        ? "read"
-        : tools.includes("bash")
-          ? "bash"
-          : undefined;
       expectedMetadata = reader
         ? formatSkillsForPrompt(result.skills, reader).trim()
         : undefined;

@@ -13,6 +13,7 @@ export interface RouteReport {
   status: "selected" | "fallback" | "cancelled";
   reason?: FailureCode;
   message?: string;
+  httpStatus?: number;
   elapsedMs: number;
   candidateCount: number;
   selectedCount: number;
@@ -30,6 +31,7 @@ export interface RouteRequest {
   config: RouterConfig;
   signal: AbortSignal | undefined;
   issues: readonly string[];
+  fileReadTool?: "read" | "bash" | "indirect";
 }
 
 export async function route(
@@ -102,6 +104,7 @@ export async function route(
       candidates,
       result.probabilities,
       request.config,
+      request.fileReadTool,
     );
     if (performance.now() - started >= request.config.routeTimeoutMs)
       throw timeoutFailure();
@@ -118,7 +121,13 @@ export async function route(
     return report(
       "fallback",
       uniqueSkills([...request.pinned, ...request.catalog]),
-      { reason: failure.code, message: failure.message },
+      {
+        reason: failure.code,
+        message: failure.message,
+        ...(failure.httpStatus === undefined
+          ? {}
+          : { httpStatus: failure.httpStatus }),
+      },
     );
   } finally {
     if (timer) clearTimeout(timer);

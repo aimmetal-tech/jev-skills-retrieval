@@ -19,9 +19,18 @@ resumed pre-extension sessions, other harnesses, or removal of historical skills
 - `src/context.ts`: raw current input, bounded visible conversation and prior metadata.
 - `src/config.ts`: defaults and validated user/project configuration merge.
 - `tests/*.test.ts`: core and real Pi provider-boundary integration tests.
+- `eval/dataset.ts`: eight bounded synthetic metadata evaluation cases.
+- `eval/run.ts`: preview by default; explicit `--live` runs real Jev requests and
+  writes partial evidence after each request to `outputs/evaluation.json`.
+- `eval/metrics.ts`: recall, false discoveries, zero hits, model, tokens and latency;
+  never count full fallback as successful recall or claim unknown billed costs.
+- `scripts/verify-package.ts`: build via npm pack, inspect tar contents, extract
+  below `.tmp/`, and load the packed ESM extension using the real Pi loader.
 - `package.json`: Pi package entry, dependencies, build and verification scripts.
 - `tsconfig*.json`, `biome.json`: strict TypeScript build and lint configuration.
 - `README.md`: scope, installation, implementation status and verification evidence.
+- `docs/verification.md`: observed acceptance evidence, HTTP 451 live-service
+  blocker, unsupported claims and reproducible verification commands.
 - `LICENSE`: MIT license. `package-lock.json`: reproducible dependency resolution.
 - `dist/`: generated package output; ignored. `.tmp/`, `outputs/`: local evidence;
   ignored. Never stage dependencies, generated packages, credentials or artifacts.
@@ -50,7 +59,15 @@ the latest report without raw task text or credentials.
 - `npm ci`: install the locked dependencies.
 - `npm run check`: typecheck, Biome lint, meaningful tests, and production build.
 - `npm run format`: apply formatting and organize imports.
+- `npm run eval`: preview the bounded synthetic suite without network calls.
+- `npm run eval -- --live`: paid Jev evaluation with `TYPESAFE_API_KEY`; default
+  at most 8 requests, no retries, 3 seconds each. Stops on permanent HTTP 4xx.
+- `npm run eval -- --live --output outputs/evaluation.json`: evidence output path;
+  `--repeat 1..20`, `--model`, `--threshold`, `--timeout-ms` configure calibration.
 - `npm pack --dry-run`: inspect package contents (runs the build).
+- `npm run verify:package`: build and create `outputs/jev-skill-router-0.1.0.tgz`,
+  validate packaged files, and load the extracted extension in Pi without an API call.
+  Needs system `tar`; temporary extraction is removed after verification.
 - Integration tests must inspect actual Pi provider requests, not only arrays.
   They bind a temporary loopback HTTP server; restricted environments may need
   permission for local networking. Tests never need real provider credentials.

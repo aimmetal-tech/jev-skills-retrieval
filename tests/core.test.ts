@@ -119,6 +119,33 @@ test("history uses newest visible text, marks truncation and never budgets curre
   );
 });
 
+test("automatic metadata budget uses Pi's active read tool wording", () => {
+  const candidate = skill("small");
+  const candidates = autoCandidates([candidate], []);
+  const probabilities = Object.fromEntries(candidates.map((c) => [c.id, 0.9]));
+  for (const reader of ["read", "bash", "indirect"] as const) {
+    const budget = formatSkillsForPrompt([candidate], reader).length;
+    assert.deepEqual(
+      selectAutomatic(
+        candidates,
+        probabilities,
+        { ...config, autoMetadataMaxChars: budget },
+        reader,
+      ),
+      [candidate],
+    );
+    assert.deepEqual(
+      selectAutomatic(
+        candidates,
+        probabilities,
+        { ...config, autoMetadataMaxChars: budget - 1 },
+        reader,
+      ),
+      [],
+    );
+  }
+});
+
 test("configuration merges project scalars and unions relative pins; bad fields keep valid pins", async () => {
   const root = await mkdtemp(join(tmpdir(), "jev-config-test-"));
   try {
@@ -254,6 +281,7 @@ test("official SDK never retries authentication, rate limit, oversized or servic
     [429, "rate_limit"],
     [413, "input_limit"],
     [500, "service_error"],
+    [451, "service_error"],
   ] as const) {
     let calls = 0;
     const evaluator = createJevEvaluator({

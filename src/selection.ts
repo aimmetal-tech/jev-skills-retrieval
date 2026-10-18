@@ -35,6 +35,7 @@ export function selectAutomatic(
   candidates: readonly Candidate[],
   probabilities: Readonly<Record<string, number>>,
   config: RouterConfig,
+  fileReadTool: "read" | "bash" | "indirect" = "read",
 ): Skill[] {
   const ranked = candidates
     .filter(
@@ -50,7 +51,10 @@ export function selectAutomatic(
   for (const candidate of ranked) {
     if (selected.length >= config.maxAutoSkills) break;
     const next = [...selected, candidate.skill];
-    if (formatSkillsForPrompt(next).length <= config.autoMetadataMaxChars)
+    if (
+      formatSkillsForPrompt(next, fileReadTool).length <=
+      config.autoMetadataMaxChars
+    )
       selected.push(candidate.skill);
   }
   return selected;
