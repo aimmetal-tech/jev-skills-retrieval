@@ -43,8 +43,12 @@ to `~/.jev-skill-router/credentials.json`; never to project config or session da
   never count full fallback as successful recall or claim unknown billed costs.
 - `benchmark/`: full public SkillRet and SkillsBench preparation and isolated Pi
   benchmark harness, added after the user confirmed the grilling design. Default
-  execution is preview/offline only; real model calls await a separately agreed
-  budget. `sources.json` pins SkillRet test revision and separate SkillsBench task
+  execution is preview/offline only. The user subsequently authorized real tests
+  without a monetary budget cap, and explicitly selected Pi's existing OpenAI
+  OAuth account, chat model `gpt-6-luna`, and `medium` thinking. Do not send this
+  model through generic LLM_BASE_URL or substitute an API-key provider. Native
+  account metadata/auth is reused in place, never copied to artifacts or sandboxes.
+  `sources.json` pins SkillRet test revision and separate SkillsBench task
   archive/registry commits; `requirements.in` and `requirements.txt` lock Python.
   `prepare.py` downloads/audits data; `data.ts` validates hashes and native skill
   discovery; `preflight.py` checks all official task digests using BenchFlow 0.6.3.
@@ -57,6 +61,10 @@ to `~/.jev-skill-router/credentials.json`; never to project config or session da
   defines setup, limits, protocol differences and evidence boundaries.
   `check.ts` runs Ruff and `test_harness.py` regressions for quarantine extraction,
   archive traversal and POSIX path validation without Docker or model calls.
+  `transport.ts` explicitly uses BENCHMARK_HTTP_PROXY > HTTPS_PROXY > HTTP_PROXY
+  when configured, without direct fallback; no proxy URL/credentials in evidence.
+  Per-provider budget wrappers count inference requests. Process-local fetch also
+  routes native OAuth refresh consistently; it is not a global budget counter.
 - `benchmark/blocked-inputs.json`: the user-reported antivirus quarantine of
   `fix-druid-loophole-cve/verifier/test_outputs.py` (ID A9E32DDD4DA1FF17).
   Static review of the official pinned file found real CVE-2021-25646 exploit
@@ -78,6 +86,9 @@ to `~/.jev-skill-router/credentials.json`; never to project config or session da
   ignored. Never stage dependencies, generated packages, credentials or artifacts.
   `outputs/benchmark/` holds pinned data, Python environment, preview reports,
   MOCK verification and future `runs/<id>/` evidence; `__pycache__/` is ignored.
+  `outputs/benchmark/live-preflight/` stores sanitized real API/account diagnostics,
+  distinct from full benchmark results. Direct API and native OAuth are different
+  paths; do not infer account model availability from LLM_BASE_URL's /models.
 
 Data flow: `input` raw text -> `before_agent_start` complete catalog and two-level
 config -> fixed baseline -> blocking credential gate -> bounded shared state and independent Jev Noul questions
@@ -134,9 +145,10 @@ conversation history. `/jev-skill status` displays source/presence, never key va
 - `npm run benchmark:preflight`: offline full input/hash/native-discovery audit;
   reports security-blocked inputs and returns exit 2 when not all tasks are ready.
 - `npm run benchmark`: empty/preview report by default; no model calls. Explicit
-  `--live` requires positive HTTP/token/turn/output/time limits and environment
-  credentials; execution model remains exactly `openai-gpt-6-luna` (unverified
-  proxy alias), separate from default Jev 1.14 routing. No silent model substitution.
+  `--live` requires positive HTTP/token/turn/output/time guards, TYPESAFE_API_KEY
+  and Pi's existing OpenAI OAuth account. User clarified the CLI label as provider
+  `openai`, model `gpt-6-luna`, thinking `medium`; use native Responses/account
+  routing, separately from Jev 1.14. No silent provider/model substitution.
   Actual HTTP requests are capped before fetch. Tokens are an observed response
   boundary stop, not a strict monetary cap; unknown usage stops further requests.
   Preserve raw trial evidence and coverage; mock/empty charts are labelled clearly.

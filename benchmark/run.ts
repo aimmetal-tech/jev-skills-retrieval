@@ -13,6 +13,7 @@ import { Budget } from "./budget.ts";
 import { contained, json, jsonl, loadSkillret, sha256 } from "./data.ts";
 import { summarizeTrials } from "./metrics.ts";
 import { mappingIds, runPiTrial } from "./pi.ts";
+import { createBenchmarkTransport } from "./transport.ts";
 import type { Group, Limits, Trial } from "./types.ts";
 
 const project = resolve(import.meta.dirname, "..");
@@ -202,6 +203,9 @@ async function main() {
   }
   const sourceLock = await json<{
     executionModel: string;
+    executionAuth?: string;
+    executionProvider?: string;
+    executionThinking?: string;
     skillret: { skills: number; queries: number };
     skillsbench: { tasks: number };
   }>(resolve(project, "benchmark/sources.json"));
@@ -230,8 +234,13 @@ async function main() {
       resolve(project, "benchmark/blocked-inputs.json"),
     ),
     model: sourceLock.executionModel,
-    api: "openai-completions",
-    reasoningEffort: "none",
+    authentication: sourceLock.executionAuth ?? "api-key",
+    provider: sourceLock.executionProvider ?? "benchmark-openai",
+    api:
+      sourceLock.executionAuth === "pi-oauth"
+        ? "native-provider"
+        : "openai-completions",
+    reasoningEffort: sourceLock.executionThinking ?? "none",
     routerConfig: DEFAULT_CONFIG,
     isolation: {
       autoDiscovery: false,
@@ -289,15 +298,23 @@ async function main() {
     return;
   }
   const limits = readLimits(values);
+  const nativeOAuth = sourceLock.executionAuth === "pi-oauth";
   if (
-    !process.env.LLM_API_KEY?.trim() ||
-    !process.env.LLM_BASE_URL?.trim() ||
+    (!nativeOAuth &&
+      (!process.env.LLM_API_KEY?.trim() ||
+        !process.env.LLM_BASE_URL?.trim())) ||
     !process.env.TYPESAFE_API_KEY?.trim()
   )
     throw new Error(
-      "LLM_API_KEY, LLM_BASE_URL and TYPESAFE_API_KEY are required; no credential-file fallback",
+      nativeOAuth
+        ? "TYPESAFE_API_KEY and an existing Pi OpenAI OAuth account are required"
+        : "LLM_API_KEY, LLM_BASE_URL and TYPESAFE_API_KEY are required; no credential-file fallback",
     );
-  const apiRoot = new URL(process.env.LLM_BASE_URL);
+  const apiRoot = new URL(
+    nativeOAuth
+      ? "https://api.openai.com/v1"
+      : (process.env.LLM_BASE_URL ?? ""),
+  );
   if (
     !["http:", "https:"].includes(apiRoot.protocol) ||
     apiRoot.username ||
@@ -331,6 +348,9 @@ async function main() {
     fs.open(resolve(output, "running.lock"), "wx"),
   );
   const budget = new Budget(limits);
+  const transport = createBenchmarkTransport();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = transport.fetch; // Also lets native OAuth refresh use the same process-local proxy.
   for (const row of previous) {
     budget.requests += row.requests.pi + row.requests.jev;
     budget.tokens += row.pi.total + row.jev.total;
@@ -342,7 +362,11 @@ async function main() {
   let status = "running";
   await writeFile(
     resolve(output, "run.json"),
-    JSON.stringify({ ...baseMeta, limits, status }, null, 2),
+    JSON.stringify(
+      { ...baseMeta, limits, status, transport: transport.mode },
+      null,
+      2,
+    ),
   );
   try {
     // Preflight both locked datasets before any paid traffic.
@@ -396,8 +420,14 @@ async function main() {
             cwd: trialDir,
             agentDir: resolve(trialDir, "agent-state"),
             model: sourceLock.executionModel,
-            baseUrl: process.env.LLM_BASE_URL,
-            apiKey: process.env.LLM_API_KEY,
+            nativeOAuth,
+            transport: transport.fetch,
+            ...(!nativeOAuth
+              ? {
+                  baseUrl: process.env.LLM_BASE_URL ?? "",
+                  apiKey: process.env.LLM_API_KEY ?? "",
+                }
+              : {}),
             budget,
             checkpoint: resolve(trialDir, "partial.json"),
           });
@@ -409,6 +439,7 @@ async function main() {
             project,
             node: process.execPath,
             model: sourceLock.executionModel,
+            nativeOAuth,
             limits: {
               ...limits,
               maxRequests: limits.maxRequests - budget.requests,
@@ -462,6 +493,7 @@ async function main() {
           status,
           requests: budget.requests,
           knownTokens: budget.tokens,
+          transport: transport.mode,
         },
         null,
         2,
@@ -471,6 +503,8 @@ async function main() {
       await writeReport(output, rows, expected, true);
       await subprocess(python, ["benchmark/report.py", output]);
     } finally {
+      globalThis.fetch = originalFetch;
+      await transport.close();
       await lock.close();
       await import("node:fs/promises").then((fs) =>
         fs.unlink(resolve(output, "running.lock")),

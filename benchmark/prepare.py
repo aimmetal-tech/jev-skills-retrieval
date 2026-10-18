@@ -247,9 +247,11 @@ def main():
         if manifest_path.exists()
         else {"schemaVersion": 1, "sources": SOURCES}
     )
-    assert manifest["sources"] == SOURCES, (
-        "Existing data belongs to a different source lock"
-    )
+    assert all(
+        manifest["sources"][suite] == SOURCES[suite]
+        for suite in ("skillret", "skillsbench")
+    ), "Existing data belongs to a different source lock"
+    manifest["sources"] = SOURCES
     for suite, prepare in (
         ("skillret", prepare_skillret),
         ("skillsbench", prepare_skillsbench),

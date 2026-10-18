@@ -4,12 +4,16 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { test } from "node:test";
-import { loadSkillsFromDir } from "@earendil-works/pi-coding-agent";
+import {
+  loadSkillsFromDir,
+  ModelRuntime,
+} from "@earendil-works/pi-coding-agent";
 import { Budget } from "../benchmark/budget.ts";
 import { retrieval, summarizeTrials } from "../benchmark/metrics.ts";
 import { runPiTrial } from "../benchmark/pi.ts";
 import { sandboxPath, shellQuote } from "../benchmark/remote.ts";
 import { readLimits, writeReport } from "../benchmark/run.ts";
+import { createBenchmarkTransport } from "../benchmark/transport.ts";
 import { emptyCounts, type Group, type Trial } from "../benchmark/types.ts";
 import { DEFAULT_CONFIG } from "../src/config.ts";
 import { skillIdentity } from "../src/selection.ts";
@@ -285,5 +289,192 @@ test("empty and mock reports cannot be presented as live performance", async () 
     assert.equal(report.groups[0]?.coverage, 0);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("native account mode preserves Responses, medium thinking and response usage without consulting real credentials", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "jev-native-responses-"));
+  const skillPath = resolve(root, "skill/SKILL.md");
+  await mkdir(resolve(root, "skill"), { recursive: true });
+  await writeFile(
+    skillPath,
+    "---\nname: native-skill\ndescription: Native fixture\n---\nNATIVE_BODY\n",
+  );
+  const catalog = loadSkillsFromDir({
+    dir: resolve(root, "skill"),
+    source: "fixture",
+  }).skills;
+  let calls = 0;
+  const server = createServer(async (req, res) => {
+    let input = "";
+    for await (const chunk of req) input += chunk;
+    const payload = JSON.parse(input);
+    assert.equal(req.url, "/v1/responses");
+    assert.equal(payload.model, "gpt-6-luna");
+    assert.equal(payload.reasoning.effort, "medium");
+    assert.equal(payload.reasoning_effort, undefined);
+    calls++;
+    const item =
+      calls === 1
+        ? {
+            type: "function_call",
+            id: "fc1",
+            call_id: "call1",
+            name: "read",
+            arguments: JSON.stringify({ path: skillPath }),
+            status: "completed",
+          }
+        : {
+            type: "message",
+            id: "msg1",
+            role: "assistant",
+            status: "completed",
+            content: [{ type: "output_text", text: "Done.", annotations: [] }],
+          };
+    const response = {
+      id: `resp${calls}`,
+      object: "response",
+      model: "gpt-6-luna",
+      status: "completed",
+      output: [item],
+      usage: {
+        input_tokens: 100,
+        output_tokens: 8,
+        input_tokens_details: { cached_tokens: 10 },
+        output_tokens_details: { reasoning_tokens: 2 },
+      },
+    };
+    res.setHeader("Content-Type", "text/event-stream");
+    const emit = (event: object) =>
+      res.write(`data: ${JSON.stringify(event)}\n\n`);
+    emit({
+      type: "response.created",
+      response: { ...response, status: "in_progress", output: [] },
+    });
+    emit({
+      type: "response.output_item.added",
+      output_index: 0,
+      item: { ...item, ...(calls === 1 ? { arguments: "" } : { content: [] }) },
+    });
+    if (calls === 1)
+      emit({
+        type: "response.function_call_arguments.delta",
+        item_id: "fc1",
+        output_index: 0,
+        delta: JSON.stringify({ path: skillPath }),
+      });
+    else {
+      emit({
+        type: "response.content_part.added",
+        item_id: "msg1",
+        output_index: 0,
+        content_index: 0,
+        part: { type: "output_text", text: "", annotations: [] },
+      });
+      emit({
+        type: "response.output_text.delta",
+        item_id: "msg1",
+        output_index: 0,
+        content_index: 0,
+        delta: "Done.",
+      });
+    }
+    emit({ type: "response.output_item.done", output_index: 0, item });
+    emit({ type: "response.completed", response });
+    res.end();
+  });
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  const address = server.address();
+  assert(address && typeof address !== "string");
+  const runtime = await ModelRuntime.create({
+    authPath: resolve(root, "auth.json"),
+    modelsPath: null,
+    refreshOnCreate: false,
+  });
+  runtime.registerProvider("openai", {
+    api: "openai-responses",
+    baseUrl: `http://127.0.0.1:${address.port}/v1`,
+    apiKey: "fake-only",
+    models: [
+      {
+        id: "gpt-6-luna",
+        name: "Native test",
+        reasoning: true,
+        input: ["text"],
+        contextWindow: 272000,
+        maxTokens: 1000,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      },
+    ],
+  });
+  const options = {
+    suite: "skillret" as const,
+    caseId: "native",
+    group: "native" as const,
+    prompt: "Read the native skill.",
+    gold: ["native"],
+    catalog,
+    ids: new Map([[skillIdentity(skillPath), "native"]]),
+    cwd: root,
+    agentDir: resolve(root, "agent"),
+    model: "gpt-6-luna",
+    nativeOAuth: true,
+    nativeRuntime: runtime,
+    evidence: "mock" as const,
+    budget: new Budget(limits),
+  };
+  try {
+    await assert.rejects(() => runPiTrial(options), /requires_pi_openai_oauth/);
+    assert.equal(calls, 0);
+    // The account check is stubbed only on this isolated fake runtime; no developer auth is loaded.
+    runtime.isUsingOAuth = () => true;
+    const row = await runPiTrial(options);
+    assert.equal(row.status, "completed");
+    assert.equal(row.execution?.thinking, "medium");
+    assert.equal(row.execution?.api, "openai-responses");
+    assert.equal(row.requests.pi, 2);
+    assert.equal(row.pi.complete, true);
+    assert.equal(row.pi.total, 216);
+    assert.equal(row.pi.reasoning, 4);
+    assert.deepEqual(
+      row.reads.map((r) => r.id),
+      ["native"],
+    );
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((done) => server.close(() => done()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("benchmark proxy rejects invalid configuration and never falls back to direct traffic", async () => {
+  assert.throws(
+    () =>
+      createBenchmarkTransport({
+        BENCHMARK_HTTP_PROXY: "socks5://secret-host",
+      }),
+    /^Error: invalid_benchmark_http_proxy$/,
+  );
+  let directCalls = 0;
+  const server = createServer((_req, res) => {
+    directCalls++;
+    res.end("unexpected");
+  });
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  const address = server.address();
+  assert(address && typeof address !== "string");
+  const transport = createBenchmarkTransport({
+    BENCHMARK_HTTP_PROXY: "http://127.0.0.1:1",
+  });
+  try {
+    await assert.rejects(() =>
+      transport.fetch(`http://127.0.0.1:${address.port}`, {
+        signal: AbortSignal.timeout(1000),
+      }),
+    );
+    assert.equal(directCalls, 0);
+  } finally {
+    await transport.close();
+    await new Promise<void>((done) => server.close(() => done()));
   }
 });

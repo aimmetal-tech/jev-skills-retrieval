@@ -5,9 +5,12 @@ import { skillIdentity } from "../src/selection.ts";
 import { Budget } from "./budget.ts";
 import { runPiTrial } from "./pi.ts";
 import { JsonBridge, remoteTools, sandboxPath } from "./remote.ts";
+import { createBenchmarkTransport } from "./transport.ts";
 import type { Group, Limits } from "./types.ts";
 
 const bridge = new JsonBridge();
+let transport: ReturnType<typeof createBenchmarkTransport> | undefined;
+const originalFetch = globalThis.fetch;
 try {
   const init = (await bridge.first) as unknown as {
     virtualRoot: string;
@@ -21,6 +24,7 @@ try {
     model: string;
     gold: string[];
     evidence: "mock" | "live";
+    nativeOAuth?: boolean;
   };
   const virtualRoot = resolve(init.virtualRoot);
   const cwd = resolve(virtualRoot, init.cwd.replace(/^\/+/, ""));
@@ -47,6 +51,10 @@ try {
       );
   }
   const budget = new Budget(init.limits);
+  if (init.evidence === "live") {
+    transport = createBenchmarkTransport();
+    globalThis.fetch = transport.fetch;
+  }
   const row = await runPiTrial({
     suite: "skillsbench",
     caseId: init.taskId,
@@ -58,9 +66,11 @@ try {
     cwd,
     agentDir: resolve(init.output, "agent-state"),
     model: init.model,
+    ...(init.nativeOAuth ? { nativeOAuth: true } : {}),
     baseUrl: process.env.LLM_BASE_URL ?? "",
     apiKey: process.env.LLM_API_KEY ?? "",
     budget,
+    ...(transport ? { transport: transport.fetch } : {}),
     customTools: remoteTools(virtualRoot, cwd, bridge.exec),
     checkpoint: resolve(init.output, "partial.json"),
     evidence: init.evidence,
@@ -75,5 +85,7 @@ try {
   );
   process.exitCode = 1;
 } finally {
+  globalThis.fetch = originalFetch;
+  await transport?.close();
   bridge.lines.close();
 }

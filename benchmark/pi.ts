@@ -1,5 +1,6 @@
 import { renameSync, writeFileSync } from "node:fs";
 import { access, mkdir, readFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { streamSimple } from "@earendil-works/pi-ai/api/openai-completions";
 import {
@@ -33,8 +34,11 @@ export interface PiTrialOptions {
   cwd: string;
   agentDir: string;
   model: string;
-  baseUrl: string;
-  apiKey: string;
+  baseUrl?: string;
+  apiKey?: string;
+  nativeOAuth?: boolean;
+  nativeRuntime?: ModelRuntime;
+  thinking?: "off" | "medium";
   budget: Budget;
   evidence?: "mock" | "live";
   customTools?: ToolDefinition[];
@@ -101,6 +105,12 @@ export async function runPiTrial(options: PiTrialOptions): Promise<Trial> {
         ctx.abort();
       }
     });
+    pi.on("before_provider_request", (event) => {
+      row.providerPayloadBytes = Math.max(
+        row.providerPayloadBytes ?? 0,
+        Buffer.byteLength(JSON.stringify(event.payload)),
+      );
+    });
   };
   const transport = options.transport ?? fetch;
   const guardedPi = budget.fetch(
@@ -156,71 +166,120 @@ export async function runPiTrial(options: PiTrialOptions): Promise<Trial> {
   }
   extensions.push(observer);
   await mkdir(options.agentDir, { recursive: true });
-  const runtime = await ModelRuntime.create({
-    authPath: resolve(options.agentDir, "auth.json"),
-    modelsPath: null,
-    refreshOnCreate: false,
-  });
-  runtime.registerProvider("benchmark-openai", {
-    baseUrl: options.baseUrl,
-    apiKey: options.apiKey,
-    api: "openai-completions",
-    models: [
-      {
-        id: options.model,
-        name: options.model,
-        reasoning: false,
-        input: ["text", "image"],
-        contextWindow: 1_050_000,
-        maxTokens: budget.limits.maxOutputTokens,
-        // Prices of an unverified proxy alias are unknown; zero catalog rates are not billed costs.
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  const nativeAgent = resolve(homedir(), ".pi/agent");
+  const runtime =
+    options.nativeRuntime ??
+    (await ModelRuntime.create(
+      options.nativeOAuth
+        ? {
+            authPath: resolve(nativeAgent, "auth.json"),
+            modelsPath: resolve(nativeAgent, "models.json"),
+            allowModelNetwork: false,
+          }
+        : {
+            authPath: resolve(options.agentDir, "auth.json"),
+            modelsPath: null,
+            refreshOnCreate: false,
+          },
+    ));
+  const recordProviderEvent = (data: unknown) => {
+    if (!data || typeof data !== "object") return;
+    const chunk = data as {
+      usage?: { prompt_tokens?: unknown; completion_tokens?: unknown };
+      model?: unknown;
+      response?: {
+        usage?: { input_tokens?: unknown; output_tokens?: unknown };
+        model?: unknown;
+      };
+    };
+    if (
+      (typeof chunk.usage?.prompt_tokens === "number" &&
+        typeof chunk.usage.completion_tokens === "number") ||
+      (typeof chunk.response?.usage?.input_tokens === "number" &&
+        typeof chunk.response.usage.output_tokens === "number")
+    )
+      rawUsageSeen = true;
+    const actualModel = chunk.response?.model ?? chunk.model;
+    if (
+      typeof actualModel === "string" &&
+      !row.responseModels.includes(actualModel)
+    )
+      row.responseModels.push(actualModel);
+  };
+  if (!options.nativeOAuth)
+    runtime.registerProvider("benchmark-openai", {
+      baseUrl: options.baseUrl ?? "",
+      apiKey: options.apiKey ?? "",
+      api: "openai-completions",
+      models: [
+        {
+          id: options.model,
+          name: options.model,
+          reasoning: false,
+          input: ["text", "image"],
+          contextWindow: 1_050_000,
+          maxTokens: budget.limits.maxOutputTokens,
+          // Prices of an unverified proxy alias are unknown; zero catalog rates are not billed costs.
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        },
+      ],
+      streamSimple: (model, context, opt) => {
+        rawUsageSeen = false;
+        streamWasSent = false;
+        return streamSimple(
+          model as Parameters<typeof streamSimple>[0],
+          context,
+          {
+            ...opt,
+            maxTokens: budget.limits.maxOutputTokens,
+            maxRetries: 0,
+            fetch: guardedPi,
+            onPayload: async (payload, currentModel) => {
+              const adjusted =
+                (await opt?.onPayload?.(payload, currentModel)) ?? payload;
+              return { ...(adjusted as object), reasoning_effort: "none" };
+            },
+            onProviderStreamEvent: (data, currentModel) => {
+              recordProviderEvent(data);
+              opt?.onProviderStreamEvent?.(data, currentModel);
+            },
+          },
+        );
       },
-    ],
-    streamSimple: (model, context, opt) => {
+    });
+  if (options.nativeOAuth) {
+    if (!runtime.isUsingOAuth("openai"))
+      throw new Error("benchmark_requires_pi_openai_oauth");
+    const nativeStream = runtime.streamSimple.bind(runtime);
+    runtime.streamSimple = (model, context, opt) => {
       rawUsageSeen = false;
       streamWasSent = false;
-      return streamSimple(
-        model as Parameters<typeof streamSimple>[0],
-        context,
-        {
-          ...opt,
-          maxTokens: budget.limits.maxOutputTokens,
-          maxRetries: 0,
-          fetch: guardedPi,
-          onPayload: async (payload, currentModel) => {
-            const adjusted =
-              (await opt?.onPayload?.(payload, currentModel)) ?? payload;
-            return { ...(adjusted as object), reasoning_effort: "none" };
-          },
-          onProviderStreamEvent: (data, currentModel) => {
-            if (data && typeof data === "object") {
-              const chunk = data as {
-                usage?: {
-                  prompt_tokens?: unknown;
-                  completion_tokens?: unknown;
-                };
-                model?: unknown;
-              };
-              if (
-                typeof chunk.usage?.prompt_tokens === "number" &&
-                typeof chunk.usage.completion_tokens === "number"
-              )
-                rawUsageSeen = true;
-              if (
-                typeof chunk.model === "string" &&
-                !row.responseModels.includes(chunk.model)
-              )
-                row.responseModels.push(chunk.model);
-            }
-            opt?.onProviderStreamEvent?.(data, currentModel);
-          },
+      return nativeStream(model, context, {
+        ...opt,
+        reasoning: "medium",
+        maxTokens: budget.limits.maxOutputTokens,
+        maxRetries: 0,
+        transport: "sse",
+        fetch: guardedPi,
+        onProviderStreamEvent: (data, currentModel) => {
+          recordProviderEvent(data);
+          opt?.onProviderStreamEvent?.(data, currentModel);
         },
-      );
-    },
-  });
-  const model = runtime.getModel("benchmark-openai", options.model);
+      });
+    };
+  }
+  const model = runtime.getModel(
+    options.nativeOAuth ? "openai" : "benchmark-openai",
+    options.model,
+  );
   if (!model) throw new Error("benchmark_model_registration_failed");
+  row.execution = {
+    provider: model.provider,
+    authentication: options.nativeOAuth ? "pi-oauth" : "api-key",
+    api: model.api,
+    thinking: options.nativeOAuth ? "medium" : "off",
+    contextWindow: model.contextWindow,
+  };
   const settings = SettingsManager.inMemory({
     retry: { enabled: false },
     compaction: { enabled: false },
@@ -275,7 +334,7 @@ export async function runPiTrial(options: PiTrialOptions): Promise<Trial> {
     resourceLoader: loader,
     settingsManager: settings,
     sessionManager: SessionManager.inMemory(options.cwd),
-    thinkingLevel: "off",
+    thinkingLevel: options.nativeOAuth ? "medium" : "off",
     tools:
       options.suite === "skillret"
         ? ["read"]
@@ -327,6 +386,13 @@ export async function runPiTrial(options: PiTrialOptions): Promise<Trial> {
       }
       if (event.message.stopReason === "error")
         row.status = budget.stopped ? "budget" : "provider_error";
+      if (event.message.stopReason === "error")
+        row.failure =
+          /context|too.{0,20}long|maximum.{0,20}token|input.{0,20}limit/i.test(
+            event.message.errorMessage ?? "",
+          )
+            ? "context_limit"
+            : "provider_error";
       if (event.message.stopReason === "aborted" && row.status === "completed")
         row.status = budget.stopped ? "budget" : "timeout";
       checkpoint();

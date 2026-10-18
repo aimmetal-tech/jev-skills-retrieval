@@ -4,8 +4,10 @@
 **同一 Pi 加载本插件**。插件源码和默认配置保持不变：`jev-1.14.0`、3 秒路由截止时间、
 最多选 5 个技能、选中元数据最多 4,000 字符。无重试、预筛选、分批或测试中调参。
 
-当前交付是数据准备、离线验证及运行/报告工具。**尚未执行真实模型 benchmark**。
-所有真实调用必须显式提供运行上限；当前没有用户确认的调用预算。
+当前交付包含数据准备、离线验证及运行/报告工具。用户已授权开始真实测试，
+并明确指定 Pi 的 OpenAI OAuth 账户、`gpt-6-luna` 和 **medium**。
+原生账户真实工具预检已返回 HTTP 200，包含有效 read 调用与 usage。
+这不等于全量 benchmark 已完成。默认命令仍不调用模型，真实运行保留明确保护参数。
 
 ## 固定数据来源
 
@@ -63,18 +65,21 @@ npm run benchmark:verify
 
 ## 将来启动真实测试
 
-执行模型严格使用 `sources.json` 中的 **`openai-gpt-6-luna`**，不会替换成相近名字。
-当前配置端点的 `/models` 列表没有该精确 ID；实际生成与工具调用支持尚未验证。
-通过独立 OpenAI Chat Completions provider 注册，`reasoning_effort=none`，不会误用 Pi
-内置同名的 Decisions classifier。两组共享相同模型与协议。环境变量为：
+执行模型使用 `sources.json` 中的 **`(openai) gpt-6-luna`**，保持 **medium**。
+通过原生 ModelRuntime 读取 Pi 已登录账户和模型目录（`~/.pi/agent/auth.json`、
+`models.json`），保留 Responses/OAuth 路由。只复用账户，不自动加载全局技能或上下文。
+不会用同名 Decisions classifier，也不会把账户请求转发到 `LLM_BASE_URL`。
+两组共享相同账户、模型、推理档位与传输方式；不复制、打印或传递 OAuth 凭据到容器。
 
-- `LLM_API_KEY`、`LLM_BASE_URL`：执行模型；URL 应为兼容 API 根路径（常以 `/v1` 结尾）。
-- `TYPESAFE_API_KEY`：Jev；可用 `TYPESAFE_BASE_URL` 指定 Jev API 根。
+Jev 仍需要 `TYPESAFE_API_KEY`，可用 `TYPESAFE_BASE_URL` 指定 API 根。
+通用 LLM_API_KEY/LLM_BASE_URL 规则保留给通用 API 集成及隔离测试，不适用于本次用户明确选择的账户路径。
 
-启动器要求以上三个主要环境变量存在。它不读取用户保存的 key 文件，不把 key 写入配置、
-运行清单、结果或容器。尚未真实验证模型 ID，因此也没有实际费用证据。
+benchmark 显式使用 `BENCHMARK_HTTP_PROXY > HTTPS_PROXY > HTTP_PROXY`，配置代理后不直连降级。
+原生 OAuth 刷新与推理请求使用同一进程代理；运行证据不保存代理地址或凭据。
+2026-10-18 原生账户预检在现有 HTTP 代理下成功，观察到 medium 和 81 个 Token；
+同日通用 API 的 Unsupported model 只说明那条独立接口不支持该名称。
 
-预算确定后替换下面的占位符；缺少任一上限会在请求前报错：
+运行保护参数明确后替换下面的占位符；缺少任一上限会在请求前报错：
 
 ```text
 npm run benchmark -- --live --suite all --output runs/full-001 --max-requests <HTTP上限> --max-total-tokens <Token停止阈值> --max-turns <每任务轮数> --max-output-tokens <每响应输出上限> --task-timeout-ms <每任务毫秒>

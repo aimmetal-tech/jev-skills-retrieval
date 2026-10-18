@@ -14,6 +14,9 @@
   },
   "piVersion": "1.3.0",
   "benchflowVersion": "0.6.3",
-  "executionModel": "openai-gpt-6-luna",
+  "executionModel": "gpt-6-luna",
+  "executionProvider": "openai",
+  "executionAuth": "pi-oauth",
+  "executionThinking": "medium",
   "repetitions": 1
 }

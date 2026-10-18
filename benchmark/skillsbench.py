@@ -127,6 +127,7 @@ async def run(config):
             model=config["model"],
             gold=gold,
             evidence=config.get("evidence", "live"),
+            nativeOAuth=config.get("nativeOAuth", False),
         )
         worker = await asyncio.create_subprocess_exec(
             config["node"],

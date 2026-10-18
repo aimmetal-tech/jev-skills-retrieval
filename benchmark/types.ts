@@ -36,6 +36,13 @@ export interface Trial {
   group: Group;
   evidence: "live" | "mock";
   model: string;
+  execution?: {
+    provider: string;
+    authentication: string;
+    api: string;
+    thinking: string;
+    contextWindow: number;
+  };
   responseModels: string[];
   status:
     | "completed"
@@ -44,6 +51,8 @@ export interface Trial {
     | "budget"
     | "harness_error";
   httpStatus: number | null;
+  failure?: "context_limit" | "provider_error";
+  providerPayloadBytes?: number;
   elapsedMs: number;
   catalogCount: number;
   selectedIds: string[];
