@@ -1,0 +1,9 @@
+{
+  "fix-druid-loophole-cve": {
+    "reason": "security_software_quarantine",
+    "reportedDate": "2026-10-18",
+    "detectionId": "A9E32DDD4DA1FF17",
+    "files": ["verifier/test_outputs.py"],
+    "policy": "Do not restore or execute the quarantined file. Keep the task in the expected 87-task roster and report it as blocked."
+  }
+}

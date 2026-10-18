@@ -10,5 +10,11 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts", "eval/**/*.ts", "scripts/**/*.ts"]
+  "include": [
+    "src/**/*.ts",
+    "tests/**/*.ts",
+    "eval/**/*.ts",
+    "scripts/**/*.ts",
+    "benchmark/**/*.ts"
+  ]
 }

@@ -3,6 +3,7 @@ dist/
 .tmp/
 outputs/
 coverage/
+__pycache__/
 *.tgz
 .env
 .env.*

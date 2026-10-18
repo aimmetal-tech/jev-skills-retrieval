@@ -41,6 +41,31 @@ to `~/.jev-skill-router/credentials.json`; never to project config or session da
   writes partial evidence after each request to `outputs/evaluation.json`.
 - `eval/metrics.ts`: recall, false discoveries, zero hits, model, tokens and latency;
   never count full fallback as successful recall or claim unknown billed costs.
+- `benchmark/`: full public SkillRet and SkillsBench preparation and isolated Pi
+  benchmark harness, added after the user confirmed the grilling design. Default
+  execution is preview/offline only; real model calls await a separately agreed
+  budget. `sources.json` pins SkillRet test revision and separate SkillsBench task
+  archive/registry commits; `requirements.in` and `requirements.txt` lock Python.
+  `prepare.py` downloads/audits data; `data.ts` validates hashes and native skill
+  discovery; `preflight.py` checks all official task digests using BenchFlow 0.6.3.
+  `run.ts`, `pi.ts`, `budget.ts`, `types.ts` isolate and observe fixed Pi 1.3.0 runs;
+  `remote.ts`, `task-worker.ts`, `skillsbench.py` bridge host tools into official
+  Docker sandboxes. `benchflow_compat.py` narrowly rebinds pure sandbox-path helpers
+  to POSIX semantics on Windows, without changing tasks, verifier or privileges.
+  `metrics.ts` and `report.py` produce JSON/CSV/PNG/SVG/HTML; `selftest.ts` verifies
+  a harmless Docker fixture with loopback fake providers. `benchmark/README.md`
+  defines setup, limits, protocol differences and evidence boundaries.
+  `check.ts` runs Ruff and `test_harness.py` regressions for quarantine extraction,
+  archive traversal and POSIX path validation without Docker or model calls.
+- `benchmark/blocked-inputs.json`: the user-reported antivirus quarantine of
+  `fix-druid-loophole-cve/verifier/test_outputs.py` (ID A9E32DDD4DA1FF17).
+  Static review of the official pinned file found real CVE-2021-25646 exploit
+  regression payloads, not proof of benignness or a confirmed AV false positive.
+  Never automatically restore/re-extract or execute this blocked file/task.
+  Preserve the official 87-task denominator; currently 86 task digests match and
+  one is security-blocked. Full SkillsBench live execution stops before paid calls.
+- `tests/benchmark.test.ts`: real Pi HTTP-boundary benchmark tests with fake keys,
+  budget enforcement, inaccessible qrels, usage accounting and report honesty.
 - `scripts/verify-package.ts`: build via npm pack, inspect tar contents, extract
   below `.tmp/`, and load the packed ESM extension using the real Pi loader.
 - `package.json`: Pi package entry, dependencies, build and verification scripts.
@@ -51,6 +76,8 @@ to `~/.jev-skill-router/credentials.json`; never to project config or session da
 - `LICENSE`: MIT license. `package-lock.json`: reproducible dependency resolution.
 - `dist/`: generated package output; ignored. `.tmp/`, `outputs/`: local evidence;
   ignored. Never stage dependencies, generated packages, credentials or artifacts.
+  `outputs/benchmark/` holds pinned data, Python environment, preview reports,
+  MOCK verification and future `runs/<id>/` evidence; `__pycache__/` is ignored.
 
 Data flow: `input` raw text -> `before_agent_start` complete catalog and two-level
 config -> fixed baseline -> blocking credential gate -> bounded shared state and independent Jev Noul questions
@@ -103,6 +130,21 @@ conversation history. `/jev-skill status` displays source/presence, never key va
 - `npm run check`: typecheck, Biome lint, meaningful tests, and production build.
 - `npm run format`: apply formatting and organize imports.
 - `npm run eval`: preview the bounded synthetic suite without network calls.
+- `npm run benchmark:prepare`: download full pinned public test inputs; no model.
+- `npm run benchmark:preflight`: offline full input/hash/native-discovery audit;
+  reports security-blocked inputs and returns exit 2 when not all tasks are ready.
+- `npm run benchmark`: empty/preview report by default; no model calls. Explicit
+  `--live` requires positive HTTP/token/turn/output/time limits and environment
+  credentials; execution model remains exactly `openai-gpt-6-luna` (unverified
+  proxy alias), separate from default Jev 1.14 routing. No silent model substitution.
+  Actual HTTP requests are capped before fetch. Tokens are an observed response
+  boundary stop, not a strict monetary cap; unknown usage stops further requests.
+  Preserve raw trial evidence and coverage; mock/empty charts are labelled clearly.
+- `npm run benchmark:verify`: explicit harmless Docker/BenchFlow/Pi integration
+  using loopback fake providers, no public CVE tasks and no real model calls.
+  Python dependency setup and resume/report commands are in benchmark/README.md.
+- `npm run benchmark:check`: locked Python Ruff checks/formatting and meaningful
+  no-network preparation/compatibility/verifier-failure tests in the dedicated Python environment.
 - `npm run eval -- --live`: paid Jev evaluation with `TYPESAFE_API_KEY`; default
   at most 8 requests, no retries, 3 seconds each. Stops on permanent HTTP 4xx.
 - `npm run eval -- --live --output outputs/evaluation.json`: evidence output path;

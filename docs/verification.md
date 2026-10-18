@@ -165,3 +165,48 @@ npm run eval
 费用默认未知；只有同时提供 `--input-usd-per-million` 与
 `--output-usd-per-million`、且全部 usage 完整时才计算估算费用。
 输入价格由操作者提供；不内置可能过期的服务定价。
+
+## 全量公开 Pi benchmark 准备（2026-10-18）
+
+用户确认采用完整 SkillRet v1.1 测试划分和 SkillsBench v1.1 标准任务，
+原生 Pi Skills 对比启用插件；当前只完成准备与离线验证，真实调用预算另定。
+插件 `src/` 未改动，固定默认 Jev 1.14、3 秒、最多 5 项，不做分批或预筛选。
+
+- SkillRet 固定 `a050ad233a504a43135bafe8cdf45574052b5729`，已下载并核验
+  6,006 skills、4,392 queries、7,187 qrels。使用 Pi 原生发现加载全部 6,006 项，
+  205 个重名额外项由稳定 ID 后缀消歧，映射与哈希存于本机 outputs。
+- SkillsBench 任务归档固定 `55bfe693f2a19f6b2f29aca3f54fe98b9d994668`，
+  registry 单独固定 `b63b7b2850226b6aa4fb5929a8c1ac7bc4d9a6af`；
+  归档内旧 registry 不能代替后续修正的 v1.1 清单。
+- BenchFlow 0.6.3 的官方摘要函数验证了 **86/87** 个完整任务。
+  `fix-druid-loophole-cve/verifier/test_outputs.py` 被安全中心删除，
+  用户提供告警 ID `A9E32DDD4DA1FF17`。静态阅读官方固定文件确认其含
+  CVE-2021-25646 主动利用回归载荷；未发现该文件中的自复制、持久化、
+  硬编码外部收集地址，但未据此认定 AV 误报或保证安全。
+  所读官方文件 SHA-256 为
+  `786bb1be0a1e81c49e005ea2b2af725cdb69804500be4ba389fde59e175479ce`。
+  未恢复该文件，未执行该安全任务、oracle 或 verifier。
+- `npm run benchmark:preflight` 写出审计报告后因一项 security_blocked 返回非零
+  （程序退出码 2）；这不是完整数据通过的结论。完整 SkillsBench live 启动也会
+  在模型请求前停止，原始 87 项分母保留。
+- `npm run check`：63 个测试、TypeScript、Biome 和生产构建通过。
+  新增 6 个测试通过真实 Pi 的回环 HTTP 请求边界验证两组提示、技能读取、
+  Pi/Jev Token、硬请求上限、未知 usage 和不可读取 qrels。
+- `npm run benchmark:check`：Ruff 检查、格式检查及 6 个 Python 回归测试通过。
+  覆盖重新准备时不释放隔离文件、归档目录穿越、完整清单、Windows/POSIX 权限路径验证，
+  以及 verifier 异常时保留已产生的模型 usage、合法部分得分不误报 verifier error。
+- `npm run benchmark:verify`：无害 Docker 答案夹具在两组均完成
+  Pi -> sandbox read/bash -> 官方 `rollout.verify()` 的闭环。
+  使用本地假模型/假 Jev 与假 key，没有真实 API 调用。
+  MOCK 证据与图表位于 `outputs/benchmark/verification/`，
+  不能当作 `openai-gpt-6-luna` 的真实性能、成本或插件提升证据。
+- Windows 下固定 BenchFlow 有容器路径误用宿主 Path/normpath 的问题；
+  harness 仅在内存重绑定相应纯路径函数，保留非 root agent 与原始路径保护，
+  不修改官方任务/verifier 或已安装包；Docker 夹具验证了该接口衔接。
+
+执行模型仍固定为 `openai-gpt-6-luna`；只读模型列表检查未列出该精确 ID，
+实际生成和工具调用能力尚未确认。Pi 内置同名 classifier 不作为执行模型替代。
+未请求真实模型、未生成真实性能结果、未估算未知代理账单。
+
+复现和预算/续跑/报告命令见 [benchmark/README.md](../benchmark/README.md)。
+原始官方任务、依赖环境、包与图表全部留在忽略的 outputs 下，不进入提交。

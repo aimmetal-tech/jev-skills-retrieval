@@ -1,5 +1,9 @@
 # Jev Skill Router
 
+全量 Pi benchmark 的准备、隔离启动、指标和图表工具见 [benchmark/README.md](benchmark/README.md)。
+默认不调用模型；真实全量测试等待预算确认。当前 SkillsBench 87 项中有 1 项被本机安全软件阻断，
+报告保留原始分母并显示缺口；详见该目录说明。
+
 Pi 原生 TypeScript 扩展。每条正常用户请求用 Jev 对本地技能 metadata
 做独立 Noul 判断，再把本轮技能交给 Pi 原生 formatter 和正文读取流程。
 

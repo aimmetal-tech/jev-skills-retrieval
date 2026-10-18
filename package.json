@@ -35,6 +35,11 @@
     "format": "biome check --write .",
     "test": "tsx --test tests/*.test.ts",
     "eval": "tsx eval/run.ts",
+    "benchmark": "tsx benchmark/run.ts",
+    "benchmark:prepare": "python benchmark/prepare.py",
+    "benchmark:preflight": "tsx benchmark/run.ts --preflight",
+    "benchmark:verify": "tsx benchmark/selftest.ts",
+    "benchmark:check": "tsx benchmark/check.ts",
     "verify:package": "tsx scripts/verify-package.ts",
     "check": "npm run typecheck && npm run lint && npm test && npm run build",
     "prepack": "npm run build"
