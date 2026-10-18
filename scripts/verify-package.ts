@@ -68,6 +68,10 @@ try {
   assert.equal(loaded.extensions.length, 1);
   assert(loaded.extensions[0]?.handlers.has("before_agent_start"));
   assert(loaded.extensions[0]?.handlers.has("input"));
+  const command = loaded.extensions[0]?.commands.get("jev-skill");
+  assert(command, "Packed extension must register /jev-skill");
+  const completions = await command.getArgumentCompletions?.("api");
+  assert(completions?.some((item) => item.value === "apikey"));
   console.log(
     `Verified ${archive.filename}: ${archive.files.length} files; packed ESM extension loaded by Pi 1.3.0; no live API call.`,
   );

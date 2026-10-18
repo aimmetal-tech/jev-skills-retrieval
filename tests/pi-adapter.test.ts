@@ -199,6 +199,7 @@ async function harness(
   });
   return {
     session,
+    loader,
     payloads,
     errors,
     root,
@@ -593,11 +594,12 @@ function terminalInput(
 
 function sdkTransport() {
   const requests: Array<{
+    url: string;
     authorization: string | null;
     body: Record<string, unknown>;
   }> = [];
   const fetch: NonNullable<AdapterDependencies["fetch"]> = async (
-    _url,
+    url,
     init,
   ) => {
     let bytes = Buffer.from(await new Response(init?.body).arrayBuffer());
@@ -605,6 +607,7 @@ function sdkTransport() {
       bytes = zstdDecompressSync(bytes);
     const body = JSON.parse(bytes.toString()) as Record<string, unknown>;
     requests.push({
+      url: String(url),
       authorization: new Headers(init?.headers).get("authorization"),
       body,
     });
@@ -706,6 +709,359 @@ test("TUI key dialog blocks provider work, resumes the same task and keeps the k
     assert.deepEqual(h.errors, []);
   } finally {
     release();
+    await h.close();
+  }
+});
+
+test("/jev-skill registers described subcommand completions and help/status stay outside model history", async () => {
+  const notices: string[] = [];
+  const transport = sdkTransport();
+  const h = await harness(
+    (root) =>
+      createSkillRouterExtension({
+        fetch: transport.fetch,
+        configuration: () => configuration(root),
+      }),
+    false,
+    undefined,
+    { mode: "rpc", ui: { notify: (message) => notices.push(message) } },
+  );
+  try {
+    const commands = h.loader.getExtensions().extensions[0]?.commands;
+    const command = commands?.get("jev-skill");
+    assert(command);
+    assert(command.description?.includes("apikey"));
+    const all = await command.getArgumentCompletions?.("");
+    assert.deepEqual(
+      all?.map((item) => item.value),
+      ["apikey", "baseurl", "status", "help"],
+    );
+    assert(all?.every((item) => item.description));
+    assert.deepEqual(
+      (await command.getArgumentCompletions?.("api"))?.map(
+        (item) => item.value,
+      ),
+      ["apikey"],
+    );
+    assert.deepEqual(
+      (await command.getArgumentCompletions?.("baseurl re"))?.map(
+        (item) => item.value,
+      ),
+      ["baseurl reset"],
+    );
+    assert.equal(
+      await command.getArgumentCompletions?.("no-such-command"),
+      null,
+    );
+    for (const text of [
+      "/jev-skill",
+      "/jev-skill help",
+      "/jev-skill status",
+      "/skill-router-status",
+      "/jev-skill unknown",
+    ])
+      await h.session.prompt(text);
+    assert(notices.some((value) => value.includes("/jev-skill apikey")));
+    assert(
+      notices.some((value) => value.includes("API key：已配置（环境变量")),
+    );
+    assert.doesNotMatch(notices.join(), /local-test-only/);
+    assert.equal(transport.requests.length, 0);
+    assert.equal(h.payloads.length, 0);
+    assert.doesNotMatch(
+      JSON.stringify(h.session.sessionManager.getBranch()),
+      /jev-skill|skill-router-status/,
+    );
+    assert.deepEqual(h.errors, []);
+  } finally {
+    await h.close();
+  }
+});
+
+test("/jev-skill apikey uses masked editing, preserves cancellation and changes later SDK credentials without model calls", async () => {
+  const notices: string[] = [];
+  const answers = ["command-secret-one", undefined, "command-secret-two"];
+  const transport = sdkTransport();
+  let dialogs = 0;
+  const h = await harness(
+    (root) =>
+      createSkillRouterExtension({
+        getApiKey: () => undefined,
+        fetch: transport.fetch,
+        configuration: () => configuration(root),
+      }),
+    false,
+    undefined,
+    {
+      mode: "tui",
+      ui: {
+        ...terminalInput((input) => {
+          dialogs++;
+          const value = answers.shift();
+          assert.match(input.render(100).join("\n"), /\/jev-skill apikey/);
+          if (value === undefined) input.handleInput("\x1b");
+          else {
+            input.handleInput(`\x1b[200~${value}\x1b[201~`);
+            assert.doesNotMatch(input.render(100).join("\n"), /command-secret/);
+            input.handleInput("\r");
+          }
+        }),
+        notify: (message) => notices.push(message),
+      },
+    },
+  );
+  try {
+    for (const [index, key] of [
+      "command-secret-one",
+      "command-secret-one",
+      "command-secret-two",
+    ].entries()) {
+      await h.session.prompt("/jev-skill apikey");
+      assert.equal(transport.requests.length, index);
+      assert.equal(h.payloads.length, index);
+      await h.session.prompt(`Task ${index}`);
+      assert.equal(transport.requests[index]?.authorization, `Bearer ${key}`);
+    }
+    await h.session.prompt("/jev-skill status");
+    assert.equal(dialogs, 3);
+    assert(notices.some((value) => value.includes("已取消 API key 修改")));
+    assert.doesNotMatch(
+      JSON.stringify({
+        notices,
+        payloads: h.payloads,
+        branch: h.session.sessionManager.getBranch(),
+        bodies: transport.requests.map((request) => request.body),
+      }),
+      /command-secret|\/jev-skill/,
+    );
+    assert.deepEqual(h.errors, []);
+  } finally {
+    await h.close();
+  }
+});
+
+test("/jev-skill baseurl persists project roots, validates dialog input and sends later SDK calls to that root; reset restores user root", async () => {
+  const notices: string[] = [];
+  const answers = [" ", "ftp://invalid.example", "https://dialog.example/jev/"];
+  const transport = sdkTransport();
+  let prompts = 0;
+  const h = await harness(
+    (root) =>
+      createSkillRouterExtension({
+        fetch: transport.fetch,
+        configuration: () => loadConfig(root, join(root, "agent")),
+      }),
+    false,
+    undefined,
+    {
+      mode: "rpc",
+      ui: {
+        notify: (message) => notices.push(message),
+        input: async (title, placeholder) => {
+          prompts++;
+          assert.match(title, /\/jev-skill baseurl/);
+          assert.match(placeholder ?? "", /https:\/\/api.typesafe.ai/);
+          return answers.shift();
+        },
+      },
+    },
+  );
+  try {
+    await mkdir(join(h.root, "agent"), { recursive: true });
+    await writeFile(
+      join(h.root, "agent", "skill-router.json"),
+      JSON.stringify({ baseUrl: "https://user.example/jev", maxAutoSkills: 1 }),
+    );
+    const file = join(h.root, ".pi", "skill-router.json");
+    await writeFile(
+      file,
+      JSON.stringify({ minProbability: 0.7, model: "jev-1.14.0" }),
+    );
+    await h.session.prompt(
+      "/jev-skill baseurl https://project.example/gateway/",
+    );
+    assert.equal(transport.requests.length, 0);
+    assert.equal(h.payloads.length, 0);
+    assert.deepEqual(JSON.parse(await readFile(file, "utf8")), {
+      minProbability: 0.7,
+      model: "jev-1.14.0",
+      baseUrl: "https://project.example/gateway",
+    });
+    await h.session.prompt("First task after base URL command");
+    assert.equal(
+      transport.requests[0]?.url,
+      "https://project.example/gateway/v1/systemone",
+    );
+    await h.session.prompt("/jev-skill baseurl");
+    assert.equal(prompts, 3);
+    await h.session.prompt("Second task after URL dialog");
+    assert.equal(
+      transport.requests[1]?.url,
+      "https://dialog.example/jev/v1/systemone",
+    );
+    await h.session.prompt("/jev-skill baseurl reset");
+    assert.deepEqual(JSON.parse(await readFile(file, "utf8")), {
+      minProbability: 0.7,
+      model: "jev-1.14.0",
+    });
+    await h.session.prompt("Third task after URL reset");
+    assert.equal(
+      transport.requests[2]?.url,
+      "https://user.example/jev/v1/systemone",
+    );
+    assert.doesNotMatch(
+      JSON.stringify(h.payloads),
+      /\/jev-skill|https:\/\/project.example|https:\/\/dialog.example/,
+    );
+    assert.deepEqual(h.errors, []);
+  } finally {
+    await h.close();
+  }
+});
+
+test("/jev-skill rejects unsafe URLs, plaintext key arguments and broken config without model calls or secret-bearing diagnostics", async () => {
+  const notices: string[] = [];
+  const transport = sdkTransport();
+  const h = await harness(
+    (root) =>
+      createSkillRouterExtension({
+        fetch: transport.fetch,
+        configuration: () => configuration(root),
+      }),
+    false,
+    undefined,
+    {
+      mode: "rpc",
+      ui: {
+        notify: (message) => notices.push(message),
+        input: async () => {
+          throw new Error("dialog-secret");
+        },
+      },
+    },
+  );
+  try {
+    const file = join(h.root, ".pi", "skill-router.json");
+    const before = '{"minProbability":0.7}';
+    await writeFile(file, before);
+    for (const command of [
+      "apikey plaintext-secret",
+      "baseurl ftp://example.com",
+      "baseurl https://user:url-secret@example.com",
+      "baseurl https://example.com?key=query-secret",
+      "baseurl https://example.com#fragment-secret",
+      "baseurl",
+      "apikey",
+    ])
+      await h.session.prompt(`/jev-skill ${command}`);
+    assert.equal(await readFile(file, "utf8"), before);
+    await writeFile(file, "{broken-json");
+    await h.session.prompt("/jev-skill baseurl https://valid.example");
+    assert.equal(await readFile(file, "utf8"), "{broken-json");
+    assert(notices.some((value) => value.includes("无法保存项目 Base URL")));
+    assert.doesNotMatch(
+      JSON.stringify({
+        notices,
+        errors: h.errors,
+        branch: h.session.sessionManager.getBranch(),
+      }),
+      /plaintext-secret|url-secret|query-secret|fragment-secret|dialog-secret/,
+    );
+    assert.equal(transport.requests.length, 0);
+    assert.equal(h.payloads.length, 0);
+    assert.deepEqual(h.errors, []);
+  } finally {
+    await h.close();
+  }
+});
+
+test("/jev-skill baseurl cancellation preserves the exact file and command mutations are rejected while a task runs", async () => {
+  const notices: string[] = [];
+  let opened: () => void = () => {};
+  const started = new Promise<void>((resolve) => {
+    opened = resolve;
+  });
+  let release: () => void = () => {};
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let dialogs = 0;
+  const h = await harness(
+    (root) =>
+      createSkillRouterExtension({
+        configuration: () => configuration(root),
+        evaluate: async (request) => {
+          opened();
+          await released;
+          return score(request, ["alpha"]);
+        },
+      }),
+    false,
+    undefined,
+    {
+      mode: "rpc",
+      ui: {
+        notify: (message) => notices.push(message),
+        input: async () => {
+          dialogs++;
+          return undefined;
+        },
+      },
+    },
+  );
+  try {
+    const file = join(h.root, ".pi", "skill-router.json");
+    const before = '{"baseUrl":"https://before.example", "maxAutoSkills": 1}';
+    await writeFile(file, before);
+    await h.session.prompt("/jev-skill baseurl");
+    assert.equal(dialogs, 1);
+    assert.equal(await readFile(file, "utf8"), before);
+    assert(notices.some((value) => value.includes("已取消 Base URL 修改")));
+    const pending = h.session.prompt("Longer normal task");
+    await started;
+    await h.session.prompt(
+      "/jev-skill baseurl https://should-not-save.example",
+    );
+    await h.session.prompt("/jev-skill apikey");
+    assert.equal(dialogs, 1);
+    assert.equal(await readFile(file, "utf8"), before);
+    assert.equal(
+      notices.filter((value) => value.includes("当前任务正在运行")).length,
+      2,
+    );
+    release();
+    await pending;
+    assert.equal(h.payloads.length, 1);
+    assert.deepEqual(h.errors, []);
+  } finally {
+    release();
+    await h.close();
+  }
+});
+
+test("headless /jev-skill accepts explicit Base URL but never opens a credential dialog or sends a model request", async () => {
+  const transport = sdkTransport();
+  const h = await harness((root) =>
+    createSkillRouterExtension({
+      getApiKey: () => undefined,
+      fetch: transport.fetch,
+      configuration: () => configuration(root),
+    }),
+  );
+  try {
+    await h.session.prompt("/jev-skill apikey");
+    await h.session.prompt("/jev-skill baseurl");
+    await h.session.prompt("/jev-skill baseurl https://headless.example");
+    assert.equal(
+      JSON.parse(
+        await readFile(join(h.root, ".pi", "skill-router.json"), "utf8"),
+      ).baseUrl,
+      "https://headless.example",
+    );
+    assert.equal(transport.requests.length, 0);
+    assert.equal(h.payloads.length, 0);
+    assert.deepEqual(h.errors, []);
+  } finally {
     await h.close();
   }
 });

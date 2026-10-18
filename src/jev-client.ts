@@ -6,6 +6,7 @@ import {
   noul,
   TypeSafeClient,
 } from "@typesafe-ai/sdk";
+import { resolveBaseUrl } from "./base-url.ts";
 import type { RoutingState } from "./context.ts";
 import type { Candidate } from "./selection.ts";
 
@@ -33,6 +34,7 @@ export interface EvaluationRequest {
   signal: AbortSignal;
   timeoutMs: number;
   model?: string;
+  baseUrl?: string;
 }
 export interface EvaluationResult {
   probabilities: Record<string, number>;
@@ -106,12 +108,18 @@ export function validateResponse(
 export function createJevEvaluator(
   options: { fetch?: Fetch; getApiKey?: () => string | undefined } = {},
 ): Evaluator {
-  return async ({ state, candidates, signal, timeoutMs, model }) => {
+  return async ({ state, candidates, signal, timeoutMs, model, baseUrl }) => {
     const apiKey = (
       options.getApiKey ? options.getApiKey() : process.env.TYPESAFE_API_KEY
     )?.trim();
     if (!apiKey)
       throw new RoutingFailure("missing_key", "TYPESAFE_API_KEY is missing.");
+    let baseURL: string;
+    try {
+      baseURL = resolveBaseUrl(baseUrl);
+    } catch {
+      throw new RoutingFailure("invalid_config", "Jev Base URL is invalid.");
+    }
     const questions: Record<string, NoulQuestion> = {};
     for (const candidate of candidates)
       questions[candidate.id] = noul(
@@ -120,6 +128,7 @@ export function createJevEvaluator(
     try {
       const client = new TypeSafeClient({
         apiKey,
+        baseURL,
         retry: { maxRetries: 0 },
         timeout: timeoutMs,
         logLevel: "off",

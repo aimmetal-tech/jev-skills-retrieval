@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { normalizeBaseUrl } from "./base-url.ts";
 import { skillIdentity } from "./selection.ts";
 
 export interface RouterConfig {
@@ -12,6 +13,7 @@ export interface RouterConfig {
   minProbability: number;
   routeTimeoutMs: number;
   model?: string;
+  baseUrl?: string;
 }
 
 export const DEFAULT_CONFIG: Readonly<RouterConfig> = Object.freeze({
@@ -88,6 +90,12 @@ export function loadConfig(cwd: string, agentDir: string): LoadedConfig {
       } else if (key === "model") {
         if (typeof item !== "string" || !item.trim()) invalid();
         else config.model = item.trim();
+      } else if (key === "baseUrl") {
+        try {
+          config.baseUrl = normalizeBaseUrl(item);
+        } catch {
+          invalid();
+        }
       } else if (key === "pinnedSkillPaths") {
         if (!Array.isArray(item)) {
           invalid();

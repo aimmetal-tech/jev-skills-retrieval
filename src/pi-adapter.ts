@@ -6,6 +6,7 @@ import {
   type Skill,
 } from "@earendil-works/pi-coding-agent";
 import type { Fetch } from "@typesafe-ai/sdk";
+import { registerJevSkillCommand } from "./commands.ts";
 import { type LoadedConfig, loadConfig } from "./config.ts";
 import { buildRoutingState, type ConversationTurn } from "./context.ts";
 import { JevCredentials } from "./credentials.ts";
@@ -43,6 +44,14 @@ export function createSkillRouterExtension(
     let conflictReported = false;
     let unsupportedSession = false;
     let lastReport: RouteReport | undefined;
+    const configuration =
+      dependencies.configuration ??
+      ((cwd: string) => loadConfig(cwd, getAgentDir()));
+    registerJevSkillCommand(pi, {
+      credentials,
+      configuration,
+      getReport: () => lastReport,
+    });
     const blockForMissingKey = (ctx: ExtensionContext, report: RouteReport) => {
       lastReport = { ...report, status: "blocked", reason: "missing_key" };
       dependencies.onReport?.(lastReport);
@@ -93,9 +102,7 @@ export function createSkillRouterExtension(
         return;
       }
       const catalog = uniqueSkills(event.systemPromptOptions.skills);
-      const loaded =
-        dependencies.configuration?.(ctx.cwd) ??
-        loadConfig(ctx.cwd, getAgentDir());
+      const loaded = configuration(ctx.cwd);
       historyLimit = loaded.config.historyMaxTurns;
       const pinned = pinnedSkills(catalog, loaded.config.pinnedSkillPaths);
       const issues = [...loaded.issues, ...pinned.issues];

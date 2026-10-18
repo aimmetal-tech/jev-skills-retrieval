@@ -21,8 +21,12 @@ task without sending a provider request; never silently fall back for missing ke
   sanitized failure codes, actual model version and token usage.
 - `src/context.ts`: raw current input, bounded visible conversation and prior metadata.
 - `src/credentials.ts`: environment-first credential resolution, blocking input,
-  private extension-memory fallback and cleanup on session shutdown.
+  private extension-memory fallback, explicit key editing and shutdown cleanup.
 - `src/key-prompt.ts`: masked TUI credential input and native RPC input bridge.
+- `src/commands.ts`: `/jev-skill` configuration/help/status subcommands, native
+  argument completions and contextual input hints; preserves legacy status command.
+- `src/base-url.ts`: HTTP(S) API-root validation, endpoint resolution and atomic
+  project `baseUrl` writes that preserve unrelated fields and reject invalid JSON.
 - `src/config.ts`: defaults and validated user/project configuration merge.
   Its explicit model default is shared by routing and evaluation.
 - `tests/*.test.ts`: core and real Pi provider-boundary integration tests.
@@ -51,6 +55,11 @@ thinking, skill bodies and session custom entries are excluded. Session reload
 with existing messages is explicitly unsupported and skips routing. Diagnostics
 persist as `jev-skill-router` custom entries and `/skill-router-status` displays
 the latest report without raw task text or credentials.
+`/jev-skill apikey` edits the same in-memory credential used by the blocking gate;
+it takes no plaintext key argument. `/jev-skill baseurl [URL|reset]` updates only
+the project `.pi/skill-router.json` endpoint; no argument opens an input dialog.
+Config mutations require an idle agent, send no model request and do not enter
+conversation history. `/jev-skill status` displays source/presence, never key values.
 
 ## API conventions
 
@@ -64,6 +73,11 @@ the latest report without raw task text or credentials.
 - Generic LLM integrations, if introduced later, prefer `LLM_API_KEY`,
   `LLM_BASE_URL`, and OpenAI Chat Completions. V1 needs no generic LLM call.
 - Use the official TypeSafe JavaScript SDK. Zero retries and one total deadline.
+- Jev Base URL precedence: project `baseUrl` > user `baseUrl` >
+  `TYPESAFE_BASE_URL` > `https://api.typesafe.ai`. Pass it as SDK `baseURL`;
+  the SDK appends `/v1/systemone`. This is a Jev API root, not a proxy setting.
+  Reject non-HTTP(S) URLs, embedded credentials, query parameters and fragments
+  without echoing invalid input. API key commands never write files/environment.
 - Default routing and evaluation model is explicitly `jev-1.14.0`, as requested
   by the user. User/project `model` and evaluation `--model` may override it;
   the SDK environment default must not silently replace the chosen version.

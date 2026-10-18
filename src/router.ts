@@ -97,6 +97,7 @@ export async function route(
         signal: controller.signal,
         timeoutMs: Math.max(1, Math.floor(remainingMs)),
         ...(request.config.model ? { model: request.config.model } : {}),
+        ...(request.config.baseUrl ? { baseUrl: request.config.baseUrl } : {}),
       }),
     ]);
     if (request.signal?.aborted) return cancelled();

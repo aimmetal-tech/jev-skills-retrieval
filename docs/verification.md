@@ -24,7 +24,7 @@ Jev SDK 为 `@typesafe-ai/sdk@0.7.0`。不扩展声明其他版本的兼容性�
 ## 阻塞式凭据输入
 
 按用户后续要求，缺 key 的 Pi 行为由“提示后回退”改为“阻塞填写”。
-当前有 37 项自动回归测试，新增凭据解析、终端掩码和真实 Pi UI 桥接用例：
+凭据解析、终端掩码和真实 Pi UI 桥接用例覆盖以下行为：
 
 - 人未提交 key 前，真实 Pi 会话不发出 Jev 或聊天 provider 请求。
 - 填写后用官方 SDK 继续原任务，同一扩展后续请求不重复弹窗。
@@ -36,6 +36,26 @@ Jev SDK 为 `@typesafe-ai/sdk@0.7.0`。不扩展声明其他版本的兼容性�
 
 这些新增测试使用虚拟 key 和本机服务，不调用线上模型。RPC 使用 Pi 原生
 输入协议，是否掩码由客户端控制。CLI 评测无 UI，仍要求环境变量 key。
+
+## `/jev-skill` 配置命令
+
+新增插件根命令和 `apikey`、`baseurl`、`status`、`help` 二级命令。
+真实 Pi loader 检查命令说明、参数补全、前缀过滤和 `baseurl reset` 提示。
+当前自动测试共 49 项，本轮新增 12 项。
+
+- 根命令、帮助、状态、未知参数、设置 key/地址均不触发模型请求，不进入聊天历史。
+- `apikey` 使用掩码弹窗，可更换内存 key；取消保留原值，后续 SDK 请求使用正确凭据。
+- key 仍优先读取环境变量；状态和成功消息不显示 key，明文 key 参数会被拒绝。
+- `baseurl` 支持参数和弹窗输入，空白/无效输入会继续提示；重置后恢复用户地址。
+- 测试检查 SDK 请求的实际 URL，包含网关路径前缀和 SDK 追加的 `/v1/systemone`。
+- 地址保存保留其他 JSON 字段；无效 URL、损坏的 JSON、弹窗异常不覆盖原配置。
+- 取消 Base URL 修改保留原文件；任务运行中拒绝配置修改，无 UI 时仍可显式传入地址。
+- 用户/项目 `baseUrl` 配置完成校验，优先于 `TYPESAFE_BASE_URL`；无配置使用官方根地址。
+- 打包验证也检查 `/jev-skill` 注册和 `apikey` 参数补全，未调用线上 API。
+
+命令文档来自 [Pi 1.3.0 扩展 API](https://github.com/earendil-works/pi/blob/v1.3.0/packages/coding-agent/docs/extensions.md)
+及 [官方命令示例](https://github.com/earendil-works/pi/blob/v1.3.0/packages/coding-agent/examples/extensions/commands.ts)。
+SDK 地址约定依据 [TypeSafeClientConfig](https://docs.typesafe.ai/sdk/javascript/api/interfaces/TypeSafeClientConfig)。
 
 Pi OpenAI 适配层可把结构化 prompt 更新折叠为首条 system message；测试直接
 检查发送后的结果。Pi 会话原始历史中的 metadata 或正文不承诺清除。

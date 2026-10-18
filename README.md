@@ -33,7 +33,7 @@ pi -e ./dist/pi-adapter.js
 
 在一个新的 Pi 会话中开始聊天。上面的 `-e` 只对本次启动生效。
 长期使用可以在构建后运行 `pi install <本项目绝对路径>`。
-本项目不自动改动用户 Pi 配置、技能文件或环境变量。
+扩展仅在显式执行 `/jev-skill baseurl` 设置时写入项目配置；技能文件和环境变量保持原样。
 
 Jev 优先从 `TYPESAFE_API_KEY` 读取 key；无需 `LLM_API_KEY`。
 未设置时，首次需要 Jev 的正常用户请求会打开**阻塞式**输入框：填写前不调用
@@ -43,9 +43,35 @@ Jev，也不向聊天模型发送本次任务。终端输入显示为掩码；RP
 该值不写入环境变量、配置文件、聊天历史或诊断日志；扩展重载或退出后清除。
 无界面模式缺 key 时明确阻止本次任务，需先配置环境变量再启动。
 采用官方 `@typesafe-ai/sdk@0.7.0`，请求一个批次，每个候选独立 Noul。
-SDK 自身的 `TYPESAFE_BASE_URL` 仍可用。模型默认显式指定 `jev-1.14.0`，
+`TYPESAFE_BASE_URL` 仍可用；项目/用户配置的 `baseUrl` 优先于该环境变量。
+模型默认显式指定 `jev-1.14.0`，
 可通过两层配置的 `model` 或评测的 `--model` 覆盖；不会被 SDK 的
 `TYPESAFE_DEFAULT_MODEL` 改成其他模型。扩展关闭 SDK 日志，避免意外输出聊天内容。
+
+## 插件命令
+
+输入 `/jev-skill` 或 `/jev-skill help` 查看用法。在 `/jev-skill` 后输入空格，
+Pi 会显示二级命令补全及用途说明；输入 `api`、`base` 可过滤选项。
+
+| 命令 | 用途与提示 |
+| --- | --- |
+| `/jev-skill apikey` | 打开掩码输入框，填写或更换 key；Enter 保存，Esc 保留原值 |
+| `/jev-skill baseurl` | 打开带地址示例的输入框；无效地址继续提示，Esc 保留原值 |
+| `/jev-skill baseurl https://api.typesafe.ai` | 设置当前项目的 Jev API 根地址，下一次路由生效 |
+| `/jev-skill baseurl reset` | 移除项目地址，恢复用户配置、环境变量或默认地址 |
+| `/jev-skill status` | 显示 key 是否已配置及来源、地址、模型和最近路由结果 |
+| `/jev-skill help` | 显示二级命令用法 |
+
+`apikey` 在弹窗中填写，不接收明文命令参数。临时 key 不写入文件或环境变量；
+若已有 `TYPESAFE_API_KEY`，该环境变量仍优先，保存后会明确提示。
+取消或弹窗失败时保留原值。无 UI 时需在启动前配置环境变量。
+配置修改要求当前任务已结束；帮助和状态可随时查看。命令不会调用模型或写入聊天历史。
+RPC 使用原生输入协议，输入框是否掩码由客户端决定。
+
+`baseurl` 只修改当前项目 `.pi/skill-router.json` 的 `baseUrl`，保留其他字段；
+已有 JSON 无效或无法写入时报告失败。地址接受 HTTP(S) 根地址及网关路径前缀，
+不接受内嵌账户、密码、查询参数或片段。SDK 会附加 `/v1/systemone`，无需手填该后缀。
+Base URL 是 Jev 服务地址；它不会配置系统 HTTP 代理。
 
 ## 配置
 
@@ -53,6 +79,8 @@ SDK 自身的 `TYPESAFE_BASE_URL` 仍可用。模型默认显式指定 `jev-1.14
 `~/.pi/agent/skill-router.json`，遵循 Pi 的 `PI_CODING_AGENT_DIR`。
 项目级：`<cwd>/.pi/skill-router.json`。每轮重新读取；普通参数项目优先，
 固定路径取两层并集。相对路径以各自配置文件的目录为基准，支持 `~/`。
+`baseUrl` 为可选字段；读取顺序为项目 > 用户 > `TYPESAFE_BASE_URL` >
+`https://api.typesafe.ai`。删除项目字段不会删除用户配置。
 
 ```json
 {
@@ -63,7 +91,8 @@ SDK 自身的 `TYPESAFE_BASE_URL` 仍可用。模型默认显式指定 `jev-1.14
   "pinnedSkillPaths": ["./skills/my-skill/SKILL.md"],
   "minProbability": 0.65,
   "routeTimeoutMs": 3000,
-  "model": "jev-1.14.0"
+  "model": "jev-1.14.0",
+  "baseUrl": "https://api.typesafe.ai"
 }
 ```
 
@@ -83,7 +112,8 @@ SDK 自身的 `TYPESAFE_BASE_URL` 仍可用。模型默认显式指定 `jev-1.14
 
 ## 故障与诊断
 
-`/skill-router-status` 查看最近结果，Pi 会话的 `jev-skill-router` 自定义条目
+`/jev-skill status` 查看配置及最近结果，旧命令 `/skill-router-status` 保持可用。
+Pi 会话的 `jev-skill-router` 自定义条目
 记录状态、原因、候选数、选择数、耗时、实际模型和 token usage，不记录
 原始聊天或 key。TUI 状态栏显示选择数量及模型；故障另有明确通知。
 

@@ -146,3 +146,24 @@ test("TUI masks typed and pasted keys at all widths while submitting the origina
   input.dispose();
   assert.equal(input.getValue(), "");
 });
+
+test("explicit key configuration replaces private memory, preserves it on cancellation and respects environment priority", async () => {
+  let environment: string | undefined;
+  const answers = ["first-key", undefined, "second-key", "third-key"];
+  const { ctx } = context(async () => answers.shift());
+  const credentials = new JevCredentials(() => environment);
+  assert.equal(credentials.getSource(), "missing");
+  await credentials.configure(ctx);
+  assert.equal(credentials.getSource(), "memory");
+  assert.equal(credentials.getApiKey(), "first-key");
+  assert.deepEqual(await credentials.configure(ctx), { status: "cancelled" });
+  assert.equal(credentials.getApiKey(), "first-key");
+  await credentials.configure(ctx);
+  assert.equal(credentials.getApiKey(), "second-key");
+  environment = "environment-key";
+  await credentials.configure(ctx);
+  assert.equal(credentials.getSource(), "environment");
+  assert.equal(credentials.getApiKey(), "environment-key");
+  environment = undefined;
+  assert.equal(credentials.getApiKey(), "third-key");
+});
