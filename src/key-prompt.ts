@@ -32,8 +32,9 @@ export class MaskedKeyInput extends Input {
         ? "Jev 需要 TYPESAFE_API_KEY"
         : "/jev-skill apikey",
       this.purpose === "task"
-        ? "填写后继续当前任务；仅在当前会话内存中使用。"
-        : "输入 TypeSafe API key；仅在当前扩展内存中使用。",
+        ? "填写并保存后继续当前任务；重启后自动读取。"
+        : "输入 TypeSafe API key；保存后重启仍然有效。",
+      "保存到 ~/.jev-skill-router/credentials.json",
       "",
       ...input,
       "",
@@ -59,7 +60,7 @@ export async function promptForApiKey(
       purpose === "task"
         ? "Jev 需要 TYPESAFE_API_KEY；填写后继续，取消将取消本次任务"
         : "/jev-skill apikey · 输入 TypeSafe API key（取消保留原值）",
-      "输入或粘贴 API key；仅在当前扩展内存中使用",
+      "输入或粘贴 API key；保存至 ~/.jev-skill-router/credentials.json",
       ctx.signal ? { signal: ctx.signal } : {},
     );
   }

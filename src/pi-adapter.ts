@@ -9,6 +9,7 @@ import type { Fetch } from "@typesafe-ai/sdk";
 import { registerJevSkillCommand } from "./commands.ts";
 import { type LoadedConfig, loadConfig } from "./config.ts";
 import { buildRoutingState, type ConversationTurn } from "./context.ts";
+import type { CredentialStore } from "./credential-store.ts";
 import { JevCredentials } from "./credentials.ts";
 import { createJevEvaluator, type Evaluator } from "./jev-client.ts";
 import { type RouteReport, route } from "./router.ts";
@@ -18,6 +19,7 @@ export interface AdapterDependencies {
   evaluate?: Evaluator;
   fetch?: Fetch;
   getApiKey?: () => string | undefined;
+  credentialStore?: CredentialStore;
   configuration?: (cwd: string) => LoadedConfig;
   onReport?: (report: RouteReport) => void;
   onDiagnostic?: (message: string) => void;
@@ -27,7 +29,10 @@ export function createSkillRouterExtension(
   dependencies: AdapterDependencies = {},
 ): ExtensionFactory {
   return (pi) => {
-    const credentials = new JevCredentials(dependencies.getApiKey);
+    const credentials = new JevCredentials(
+      dependencies.getApiKey,
+      dependencies.credentialStore,
+    );
     const evaluate =
       dependencies.evaluate ??
       createJevEvaluator({
@@ -130,11 +135,13 @@ export function createSkillRouterExtension(
         const credential = await credentials.ensure(ctx);
         if (credential.status !== "ready") {
           const message =
-            credential.status === "unavailable"
-              ? "Jev 缺少 TYPESAFE_API_KEY，当前模式无法弹出输入框。请设置环境变量后重新启动；本次任务已停止。"
-              : credential.status === "ui_error"
-                ? "无法打开 Jev API key 输入框；本次任务已停止。"
-                : "未提供 Jev API key；本次任务已取消，未发送模型请求。";
+            credential.status === "storage_error"
+              ? "无法读取或保存 Jev 本地凭据；请用 /jev-skill apikey 重新设置并检查用户目录权限。本次任务已停止。"
+              : credential.status === "unavailable"
+                ? "Jev 缺少 API key，当前模式无法弹出输入框。请用 /jev-skill apikey 保存凭据或设置 TYPESAFE_API_KEY 后重启；本次任务已停止。"
+                : credential.status === "ui_error"
+                  ? "无法打开 Jev API key 输入框；本次任务已停止。"
+                  : "未提供 Jev API key；本次任务已取消，未发送模型请求。";
           blockForMissingKey(ctx, {
             status: "blocked",
             reason: "missing_key",

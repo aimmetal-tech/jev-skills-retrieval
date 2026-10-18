@@ -12,8 +12,8 @@ import type { RouteReport } from "./router.ts";
 const subcommands = [
   {
     value: "apikey",
-    label: "apikey",
-    description: "打开掩码输入框，填写或更换 API key（仅内存）",
+    label: "apikey [reset]",
+    description: "打开掩码输入框，保存用户凭据；reset 删除本地凭据",
   },
   {
     value: "baseurl",
@@ -29,7 +29,8 @@ const subcommands = [
 ];
 
 const help = [
-  "/jev-skill apikey  — 打开掩码输入框，填写或更换临时 API key",
+  "/jev-skill apikey  — 打开掩码输入框，保存或更换用户 API key",
+  "/jev-skill apikey reset  — 删除用户目录中的本地凭据",
   "/jev-skill baseurl  — 打开 Base URL 输入框",
   "/jev-skill baseurl <URL>  — 保存当前项目的 Jev API 根地址",
   "/jev-skill baseurl reset  — 移除项目地址，恢复用户配置/环境变量/默认值",
@@ -37,7 +38,7 @@ const help = [
   "/jev-skill help  — 显示此帮助",
   "提示：输入 /jev-skill 后加空格，可查看二级命令补全。",
   "地址示例：https://api.typesafe.ai（不要附加 /v1/systemone）。",
-  "API key 优先使用 TYPESAFE_API_KEY；弹窗输入仅存内存，重载/退出后清除。",
+  "API key 优先使用 TYPESAFE_API_KEY；弹窗输入保存至 ~/.jev-skill-router/credentials.json。",
 ].join("\n");
 
 export function registerJevSkillCommand(
@@ -53,6 +54,17 @@ export function registerJevSkillCommand(
       "配置 Jev：apikey（掩码输入） · baseurl [URL|reset] · status · help",
     getArgumentCompletions: (prefix) => {
       const text = prefix.trimStart();
+      if (/^apikey\s/.test(text)) {
+        return "reset".startsWith(text.replace(/^apikey\s+/, ""))
+          ? [
+              {
+                value: "apikey reset",
+                label: "reset",
+                description: "删除本地凭据；环境变量仍优先",
+              },
+            ]
+          : null;
+      }
       if (/^baseurl\s/i.test(text)) {
         const argument = text.replace(/^baseurl\s+/i, "");
         return [
@@ -98,7 +110,11 @@ export function registerJevSkillCommand(
         const report = options.getReport();
         notify(
           [
-            `API key：${source === "environment" ? "已配置（环境变量 TYPESAFE_API_KEY）" : source === "memory" ? "已配置（当前扩展内存）" : "未配置；运行 /jev-skill apikey 填写"}`,
+            `API key：${source === "environment" ? "已配置（环境变量 TYPESAFE_API_KEY）" : source === "file" ? "已配置（用户凭据文件）" : "未配置；运行 /jev-skill apikey 填写"}`,
+            `凭据路径：${options.credentials.filePath}`,
+            ...(options.credentials.hasStorageError()
+              ? ["本地凭据文件无法读取；请用 /jev-skill apikey 重新设置。"]
+              : []),
             `Base URL：${endpoint}`,
             `地址来源：${loaded.config.baseUrl ? "用户/项目配置" : process.env.TYPESAFE_BASE_URL?.trim() ? "环境变量 TYPESAFE_BASE_URL" : "SDK 默认地址"}`,
             `模型：${loaded.config.model ?? "SDK 默认模型"}`,
@@ -116,7 +132,7 @@ export function registerJevSkillCommand(
         notify(`未知命令或参数。\n${help}`, "warning");
         return;
       }
-      if (command === "apikey" && argument) {
+      if (command === "apikey" && argument && argument !== "reset") {
         notify(
           "请运行 /jev-skill apikey，在掩码输入框中填写；key 不作为命令明文参数。",
           "warning",
@@ -128,16 +144,34 @@ export function registerJevSkillCommand(
         return;
       }
       if (command === "apikey") {
+        if (argument === "reset") {
+          try {
+            options.credentials.reset();
+            notify(
+              options.credentials.getSource() === "environment"
+                ? "已删除本地凭据；TYPESAFE_API_KEY 仍然生效。"
+                : "已删除本地凭据；下次需要 Jev 时会要求重新填写。",
+            );
+          } catch {
+            notify("无法删除本地凭据；请检查用户目录权限。", "error");
+          }
+          return;
+        }
         const result = await options.credentials.configure(ctx);
         if (result.status === "ready") {
           notify(
             options.credentials.getSource() === "environment"
-              ? "临时 API key 已保存在内存；当前仍优先使用 TYPESAFE_API_KEY。更换环境变量后需重启 Pi。"
-              : "API key 已保存在当前扩展内存，后续任务直接使用；重载/退出后清除。",
+              ? `API key 已保存至 ${options.credentials.filePath}；当前仍优先使用 TYPESAFE_API_KEY。`
+              : `API key 已保存至 ${options.credentials.filePath}；重启后自动读取。`,
           );
         } else if (result.status === "unavailable") {
           notify(
-            "当前模式无法打开输入框；请在启动 Pi 前设置 TYPESAFE_API_KEY。",
+            "当前模式无法打开输入框；请先用交互模式的 /jev-skill apikey 保存凭据，或设置 TYPESAFE_API_KEY。",
+            "error",
+          );
+        } else if (result.status === "storage_error") {
+          notify(
+            "无法保存本地凭据；请检查用户目录权限。未采用本次输入，原凭据未改变。",
             "error",
           );
         } else if (result.status === "ui_error") {

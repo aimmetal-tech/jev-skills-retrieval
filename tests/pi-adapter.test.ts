@@ -20,6 +20,10 @@ import {
   type RouterConfig,
 } from "../src/config.ts";
 import {
+  credentialFile,
+  FileCredentialStore,
+} from "../src/credential-store.ts";
+import {
   createJevEvaluator,
   type EvaluationRequest,
   type EvaluationResult,
@@ -31,11 +35,13 @@ import {
   createSkillRouterExtension as createExtension,
 } from "../src/pi-adapter.ts";
 import type { RouteReport } from "../src/router.ts";
+import { MemoryCredentialStore } from "./credential-fixtures.ts";
 
 // Existing boundary fixtures use an explicit fake credential; never inherit a real key.
 function createSkillRouterExtension(dependencies: AdapterDependencies) {
   return createExtension({
     getApiKey: () => "local-test-only",
+    credentialStore: new MemoryCredentialStore(),
     ...dependencies,
   });
 }
@@ -749,6 +755,12 @@ test("/jev-skill registers described subcommand completions and help/status stay
       ),
       ["baseurl reset"],
     );
+    assert.deepEqual(
+      (await command.getArgumentCompletions?.("apikey re"))?.map(
+        (item) => item.value,
+      ),
+      ["apikey reset"],
+    );
     assert.equal(
       await command.getArgumentCompletions?.("no-such-command"),
       null,
@@ -773,6 +785,107 @@ test("/jev-skill registers described subcommand completions and help/status stay
       /jev-skill|skill-router-status/,
     );
     assert.deepEqual(h.errors, []);
+  } finally {
+    await h.close();
+  }
+});
+
+test("saved API key survives a fresh Pi extension in headless mode; reset removes disk credentials", async () => {
+  const home = await mkdtemp(join(tmpdir(), "jev-pi-persistent-home-"));
+  const file = credentialFile(home);
+  const key = "test-pi-durable-key";
+  const transport = sdkTransport();
+  let h: Awaited<ReturnType<typeof harness>> | undefined;
+  try {
+    h = await harness(
+      (root) =>
+        createSkillRouterExtension({
+          getApiKey: () => undefined,
+          credentialStore: new FileCredentialStore(file),
+          fetch: transport.fetch,
+          configuration: () => configuration(root),
+        }),
+      false,
+      undefined,
+      { mode: "rpc", ui: { input: async () => key } },
+    );
+    await h.session.prompt(
+      "Initial task with automatic persistent credential input",
+    );
+    assert.equal(transport.requests[0]?.authorization, `Bearer ${key}`);
+    assert.equal(new FileCredentialStore(file).read(), key);
+    assert.doesNotMatch(
+      JSON.stringify({
+        payloads: h.payloads,
+        branch: h.session.sessionManager.getBranch(),
+      }),
+      /test-pi-durable-key/,
+    );
+    await h.close();
+    h = undefined;
+    h = await harness((root) =>
+      createSkillRouterExtension({
+        getApiKey: () => undefined,
+        credentialStore: new FileCredentialStore(file),
+        fetch: transport.fetch,
+        configuration: () => configuration(root),
+      }),
+    );
+    await h.session.prompt("Next process uses the saved file without UI");
+    assert.equal(transport.requests[1]?.authorization, `Bearer ${key}`);
+    await h.session.prompt("/jev-skill apikey reset");
+    assert.equal(new FileCredentialStore(file).read(), undefined);
+    assert.equal(transport.requests.length, 2);
+    assert.equal(h.payloads.length, 1);
+    assert.deepEqual(h.errors, []);
+  } finally {
+    await h?.close();
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("a failed credential save blocks Pi before SDK/provider requests and keeps secret-bearing filesystem errors private", async () => {
+  const transport = sdkTransport();
+  const reports: RouteReport[] = [];
+  const notices: string[] = [];
+  const store = new MemoryCredentialStore();
+  store.save = () => {
+    throw new Error("secret-storage-error");
+  };
+  const h = await harness(
+    (root) =>
+      createSkillRouterExtension({
+        getApiKey: () => undefined,
+        credentialStore: store,
+        fetch: transport.fetch,
+        configuration: () => configuration(root),
+        onReport: (report) => reports.push(report),
+      }),
+    false,
+    undefined,
+    {
+      mode: "rpc",
+      ui: {
+        input: async () => "unsaved-test-key",
+        notify: (message) => notices.push(message),
+      },
+    },
+  );
+  try {
+    await h.session.prompt("Task whose credential cannot be saved");
+    assert.equal(transport.requests.length, 0);
+    assert.equal(h.payloads.length, 0);
+    assert.equal(reports[0]?.status, "blocked");
+    assert(notices.some((message) => message.includes("本地凭据")));
+    assert.doesNotMatch(
+      JSON.stringify({
+        reports,
+        notices,
+        branch: h.session.sessionManager.getBranch(),
+      }),
+      /unsaved-test-key|secret-storage-error/,
+    );
+    assertOnlyPiAbort(h.errors);
   } finally {
     await h.close();
   }

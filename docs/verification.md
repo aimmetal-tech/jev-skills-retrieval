@@ -28,7 +28,7 @@ Jev SDK 为 `@typesafe-ai/sdk@0.7.0`。不扩展声明其他版本的兼容性�
 
 - 人未提交 key 前，真实 Pi 会话不发出 Jev 或聊天 provider 请求。
 - 填写后用官方 SDK 继续原任务，同一扩展后续请求不重复弹窗。
-- 环境变量优先；临时输入仅保存在扩展内存，退出时清除，不修改进程环境。
+- 环境变量优先；输入保存到用户凭据文件，退出只清理缓存，不修改进程环境。
 - 空输入、空白或多行值继续要求填写；TUI 输入和粘贴均不明文渲染。
 - 取消、无界面、弹窗异常及预检后凭据失效都阻止模型请求，不回退全目录继续。
 - 测试检查实际聊天 HTTP payload、会话条目及发给 Jev 的 state 中没有 key。
@@ -41,10 +41,10 @@ Jev SDK 为 `@typesafe-ai/sdk@0.7.0`。不扩展声明其他版本的兼容性�
 
 新增插件根命令和 `apikey`、`baseurl`、`status`、`help` 二级命令。
 真实 Pi loader 检查命令说明、参数补全、前缀过滤和 `baseurl reset` 提示。
-当前自动测试共 49 项，本轮新增 12 项。
+命令最初交付时共 49 项测试；增加持久化后当前共 57 项。
 
 - 根命令、帮助、状态、未知参数、设置 key/地址均不触发模型请求，不进入聊天历史。
-- `apikey` 使用掩码弹窗，可更换内存 key；取消保留原值，后续 SDK 请求使用正确凭据。
+- `apikey` 使用掩码弹窗，可更换用户文件中的 key；取消保留原值，后续 SDK 请求使用正确凭据。
 - key 仍优先读取环境变量；状态和成功消息不显示 key，明文 key 参数会被拒绝。
 - `baseurl` 支持参数和弹窗输入，空白/无效输入会继续提示；重置后恢复用户地址。
 - 测试检查 SDK 请求的实际 URL，包含网关路径前缀和 SDK 追加的 `/v1/systemone`。
@@ -56,6 +56,28 @@ Jev SDK 为 `@typesafe-ai/sdk@0.7.0`。不扩展声明其他版本的兼容性�
 命令文档来自 [Pi 1.3.0 扩展 API](https://github.com/earendil-works/pi/blob/v1.3.0/packages/coding-agent/docs/extensions.md)
 及 [官方命令示例](https://github.com/earendil-works/pi/blob/v1.3.0/packages/coding-agent/examples/extensions/commands.ts)。
 SDK 地址约定依据 [TypeSafeClientConfig](https://docs.typesafe.ai/sdk/javascript/api/interfaces/TypeSafeClientConfig)。
+
+## 用户目录凭据持久化
+
+按用户后续授权，替换原先的“仅内存”方案：`/jev-skill apikey` 和缺 key 时的
+自动弹窗都保存到 `~/.jev-skill-router/credentials.json`。
+优先级为 `TYPESAFE_API_KEY` > 用户文件；不自动复制环境变量到文件。
+`/jev-skill apikey reset` 删除文件与缓存；`status` 显示路径和来源。
+
+本轮新增 8 项测试，完整检查共 57 项通过：
+
+- 真实 Windows DPAPI 加密/解密，磁盘 JSON 不含虚拟 key 的明文；支持 Unicode 输入。
+- 用户文件通过新 store 和新的真实 Pi 扩展实例继续读取，无 UI 也能执行后续任务。
+- 原子更新不残留临时文件；取消、无效输入和保存失败保留旧凭据。
+- 删除文件后不再复用缓存；环境变量可绕过损坏的文件，且始终优先。
+- 损坏 JSON、格式版本不符和无法解密均使用脱敏错误；可通过交互填写修复。
+- 保存失败时真实 Pi 不发送 Jev 或聊天 provider 请求，错误与会话记录中没有 key。
+- 现有测试使用可注入的内存 store，新文件测试使用临时假主目录；不触碰真实用户凭据。
+
+Windows DPAPI 使用当前用户范围，依据 [.NET 数据保护文档](https://github.com/dotnet/docs/blob/main/docs/standard/security/how-to-use-data-protection.md)。
+Windows 的文件模式不提供 Unix 所有者隔离，见 [Node.js 文件权限说明](https://github.com/nodejs/node/blob/main/doc/api/fs.md)。
+Linux/macOS 分支采用 0700 目录和 0600 明文文件，本轮未在这两个系统运行。
+CLI `eval --live` 仍只读取环境变量；本节的保存文件读取适用于 Pi 扩展。
 
 Pi OpenAI 适配层可把结构化 prompt 更新折叠为首条 system message；测试直接
 检查发送后的结果。Pi 会话原始历史中的 metadata 或正文不承诺清除。
