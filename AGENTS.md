@@ -29,8 +29,8 @@ resumed pre-extension sessions, other harnesses, or removal of historical skills
 - `package.json`: Pi package entry, dependencies, build and verification scripts.
 - `tsconfig*.json`, `biome.json`: strict TypeScript build and lint configuration.
 - `README.md`: scope, installation, implementation status and verification evidence.
-- `docs/verification.md`: observed acceptance evidence, HTTP 451 live-service
-  blocker, unsupported claims and reproducible verification commands.
+- `docs/verification.md`: observed acceptance evidence, HTTP 451 diagnosis,
+  successful explicit-proxy evaluation, limitations and reproduction commands.
 - `LICENSE`: MIT license. `package-lock.json`: reproducible dependency resolution.
 - `dist/`: generated package output; ignored. `.tmp/`, `outputs/`: local evidence;
   ignored. Never stage dependencies, generated packages, credentials or artifacts.
@@ -64,6 +64,11 @@ the latest report without raw task text or credentials.
   at most 8 requests, no retries, 3 seconds each. Stops on permanent HTTP 4xx.
 - `npm run eval -- --live --output outputs/evaluation.json`: evidence output path;
   `--repeat 1..20`, `--model`, `--threshold`, `--timeout-ms` configure calibration.
+- Explicit proxy diagnosis used process-local Undici `ProxyAgent` bound to
+  `http://127.0.0.1:7688`, with no direct fallback. Reproduction is documented in
+  `docs/verification.md`; evidence is in `outputs/proxy-7688-probe.json` and
+  `outputs/evaluation-proxy-7688.json`. The default extension does not yet enable
+  a proxy automatically. Do not confuse sandbox elevation with proxy routing.
 - `npm pack --dry-run`: inspect package contents (runs the build).
 - `npm run verify:package`: build and create `outputs/jev-skill-router-0.1.0.tgz`,
   validate packaged files, and load the extracted extension in Pi without an API call.
