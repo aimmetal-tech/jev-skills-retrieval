@@ -26,9 +26,17 @@ to `~/.jev-skill-router/credentials.json`; never to project config or session da
   increasing/splitting limits: defaults are 5s preparation, 10s evaluation, 15s
   total. Existing routeTimeoutMs overrides remain a total cap. Synchronous local
   work is checked after completion, not forcibly preempted by JavaScript timers.
+- `src/batching.ts`: deterministic full-catalog byte-guard packing and strictly
+  serial dispatch (concurrency fixed at 1), default 1s completion-to-next-start
+  interval, per-batch cancellation/deadline, complete-score merging and per-attempt
+  sanitized evidence. Defaults: 48,000 uncompressed JSON bytes per batch, 24,000
+  bytes for state plus any question, 128 planned calls, 10s per call. Byte guards
+  are not verified Jev token bounds. No prefiltering, prompt changes or retries.
 - `src/jev-client.ts`: official SDK batch Noul requests, strict response validation,
   sanitized failure codes, allowlisted `max_tokens_exceeded` service detail,
   actual model version and token usage. Never forward arbitrary server error data.
+  Shared question/request builders keep byte planning identical to SDK payloads;
+  independently observed usage is retained even when answer validation fails.
 - `src/context.ts`: raw current input, bounded visible conversation and prior metadata.
 - `src/credentials.ts`: environment-first credential resolution, blocking input,
   cached user-file fallback, explicit key editing/reset and shutdown cache cleanup.
@@ -73,8 +81,15 @@ to `~/.jev-skill-router/credentials.json`; never to project config or session da
   when configured, without direct fallback; no proxy URL/credentials in evidence.
   Per-provider budget wrappers count inference requests. Process-local fetch also
   routes native OAuth refresh consistently; it is not a global budget counter.
+  `profile.ts` defines an explicit full-catalog benchmark profile: 590s evaluation,
+  600s total, serial batches; interactive defaults remain 10s evaluation/15s total.
+  Benchmark task timeout is still an explicit CLI guard; use at least 720s to leave
+  Pi execution time after full routing. Never silently raise a supplied guard.
   `diagnose-routing.ts` verifies the full 6,006-skill request-local snapshot offline
-  by default; `--live` sends at most one real Jev request, with no Pi generation.
+  by default; `--live` sends at most 128 serial Jev requests, with no Pi generation.
+  It requires a fresh output directory, checkpoints attempts.jsonl/partial.json,
+  and exits nonzero on incomplete scoring or usage. Offline usage is a labelled
+  zero-valued fixture; only actual responses establish real costs or latency.
   It writes sanitized preparation/HTTP/timing evidence below
   `outputs/benchmark/diagnostics/`; this is not a task accuracy benchmark.
 - `benchmark/blocked-inputs.json`: the user-reported antivirus quarantine of
@@ -85,7 +100,10 @@ to `~/.jev-skill-router/credentials.json`; never to project config or session da
   Preserve the official 87-task denominator; currently 86 task digests match and
   one is security-blocked. Full SkillsBench live execution stops before paid calls.
 - `tests/benchmark.test.ts`: real Pi HTTP-boundary benchmark tests with fake keys,
-  budget enforcement, inaccessible qrels, usage accounting and report honesty.
+  budget enforcement, inaccessible qrels, per-batch accounting without aggregate
+  double charges, unknown usage and report honesty. `tests/batching.test.ts`
+  checks all 6,006 identities, exact JSON byte sizes, serial/paced SDK calls,
+  global selection, failed/unknown/mixed responses, deadlines and cancellation.
 - `scripts/verify-package.ts`: build via npm pack, inspect tar contents, extract
   below `.tmp/`, and load the packed ESM extension using the real Pi loader.
 - `package.json`: Pi package entry, dependencies, build and verification scripts.
@@ -115,7 +133,16 @@ Catalog preparation produces a single request-local snapshot before the credenti
 gate; its duration is passed to the router and consumes the same total deadline.
 Credential input/storage waiting does not consume that deadline. Reports include
 preparation, evaluator (SDK/network/parsing) and selection milliseconds; timeoutPhase
-distinguishes preparation/evaluation/total. No batching or prefiltering is added.
+distinguishes preparation/evaluation/total/batch. The user subsequently authorized
+full-catalog batching and asked to lower concurrency: it is fixed at 1. Every
+eligible candidate is scored once; partial results cannot become normal zero hits
+or selected results. Failure retains normal explicit fallback; missing keys and
+caller cancellation keep their blocking/cancellation behavior. No prefiltering.
+Per-attempt callbacks run synchronously after settlement and before the next call.
+The benchmark accounts/checkpoints actual dispatched HTTP attempts there; the final
+route report only summarizes them. Logical SDK attempts blocked before fetch are
+not counted as actual HTTP. Known partial costs survive failure; unknown usage and
+permanent HTTP errors still stop further budgeted traffic.
 `/jev-skill apikey` saves the same credential used by the blocking gate to the user
 file; `apikey reset` removes the file and cache. It takes no plaintext key argument.
 `/jev-skill baseurl [URL|reset]` updates only
@@ -145,8 +172,10 @@ conversation history. `/jev-skill status` displays source/presence, never key va
   `detail.error_type=max_tokens_exceeded`. Official live docs confirm Jev 1.14
   defaults to 64k per request and 32k for state plus any one question; there is no
   separate question-count limit. The 262k long-context header is opt-in and has
-  documented speed/accuracy tradeoffs. It has not been enabled; batching and
-  prefiltering remain separate unimplemented designs, not part of solution A.
+  documented speed/accuracy tradeoffs. It has not been enabled. Batching is now
+  implemented after solution A; prefiltering remains unimplemented. Serial calls
+  and spacing do not guarantee compliance with account-wide RPS/TPS limits or
+  prevent other processes from using the same organization's quota.
 - Jev Base URL precedence: project `baseUrl` > user `baseUrl` >
   `TYPESAFE_BASE_URL` > `https://api.typesafe.ai`. Pass it as SDK `baseURL`;
   the SDK appends `/v1/systemone`. This is a Jev API root, not a proxy setting.

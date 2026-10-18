@@ -8,11 +8,11 @@ import {
 } from "node:fs/promises";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { DEFAULT_CONFIG } from "../src/config.ts";
 import { Budget } from "./budget.ts";
 import { contained, json, jsonl, loadSkillret, sha256 } from "./data.ts";
 import { summarizeTrials } from "./metrics.ts";
 import { mappingIds, runPiTrial } from "./pi.ts";
+import { BENCHMARK_ROUTER_CONFIG } from "./profile.ts";
 import { createBenchmarkTransport } from "./transport.ts";
 import type { Group, Limits, Trial } from "./types.ts";
 
@@ -241,7 +241,7 @@ async function main() {
         ? "native-provider"
         : "openai-completions",
     reasoningEffort: sourceLock.executionThinking ?? "none",
-    routerConfig: DEFAULT_CONFIG,
+    routerConfig: BENCHMARK_ROUTER_CONFIG,
     isolation: {
       autoDiscovery: false,
       otherExtensions: false,

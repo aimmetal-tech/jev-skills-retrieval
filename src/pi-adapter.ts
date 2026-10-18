@@ -6,6 +6,7 @@ import {
   type Skill,
 } from "@earendil-works/pi-coding-agent";
 import type { Fetch } from "@typesafe-ai/sdk";
+import type { BatchAttempt } from "./batching.ts";
 import { registerJevSkillCommand } from "./commands.ts";
 import { type LoadedConfig, loadConfig } from "./config.ts";
 import { buildRoutingState, type ConversationTurn } from "./context.ts";
@@ -22,6 +23,7 @@ export interface AdapterDependencies {
   credentialStore?: CredentialStore;
   configuration?: (cwd: string) => LoadedConfig;
   onReport?: (report: RouteReport) => void;
+  onAttempt?: (attempt: BatchAttempt) => void;
   onDiagnostic?: (message: string) => void;
 }
 
@@ -175,6 +177,9 @@ export function createSkillRouterExtension(
           config: loaded.config,
           signal: ctx.signal,
           issues,
+          ...(dependencies.onAttempt
+            ? { onAttempt: dependencies.onAttempt }
+            : {}),
           ...(reader ? { fileReadTool: reader } : {}),
         },
         evaluate,

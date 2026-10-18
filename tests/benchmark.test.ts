@@ -16,7 +16,9 @@ import { readLimits, writeReport } from "../benchmark/run.ts";
 import { createBenchmarkTransport } from "../benchmark/transport.ts";
 import { emptyCounts, type Group, type Trial } from "../benchmark/types.ts";
 import { DEFAULT_CONFIG } from "../src/config.ts";
-import { skillIdentity } from "../src/selection.ts";
+import { buildRoutingState } from "../src/context.ts";
+import { jevRequest } from "../src/jev-client.ts";
+import { autoCandidates, skillIdentity } from "../src/selection.ts";
 
 const limits = {
   maxRequests: 10,
@@ -104,6 +106,8 @@ async function boundary(
   requestCap = 10,
   usage = true,
   forbidden = false,
+  batched = false,
+  unknownJev = false,
 ) {
   const root = await mkdtemp(resolve(tmpdir(), "jev-benchmark-"));
   const payloads: string[] = [];
@@ -141,7 +145,10 @@ async function boundary(
         JSON.stringify({
           model: "jev-mock-response",
           answers,
-          usage: { input_tokens: 20, output_tokens: 2 },
+          usage: {
+            input_tokens: 20,
+            output_tokens: unknownJev && jevCalls === 2 ? null : 2,
+          },
         }),
       );
       return;
@@ -188,6 +195,19 @@ async function boundary(
     dir: resolve(root, "skills"),
     source: "isolated-benchmark-test",
   }).skills;
+  const pairBytes = Math.max(
+    ...autoCandidates(catalog, []).map((candidate) =>
+      Buffer.byteLength(
+        JSON.stringify(
+          jevRequest(
+            buildRoutingState("Please use alpha", [], [], DEFAULT_CONFIG),
+            [candidate],
+            DEFAULT_CONFIG.model,
+          ),
+        ),
+      ),
+    ),
+  );
   const budget = new Budget({ ...limits, maxRequests: requestCap });
   try {
     const checkpoint = resolve(root, "partial.json");
@@ -210,7 +230,14 @@ async function boundary(
       routerDependencies: {
         getApiKey: () => "fake-jev-only",
         configuration: () => ({
-          config: { ...DEFAULT_CONFIG, pinnedSkillPaths: [], baseUrl },
+          config: {
+            ...DEFAULT_CONFIG,
+            pinnedSkillPaths: [],
+            baseUrl,
+            ...(batched
+              ? { batchMaxPayloadBytes: pairBytes, batchIntervalMs: 0 }
+              : {}),
+          },
           issues: [],
         }),
       },
@@ -264,6 +291,32 @@ test("Pi continuation is stopped by the HTTP cap, missing usage stays unknown, a
   const forbidden = await boundary("native", 10, true, true);
   assert.equal(forbidden.row.reads.length, 0);
   assert.doesNotMatch(forbidden.payloads.join("\n"), /HIDDEN_GOLD_SECRET/);
+});
+
+test("serial Jev batches are accounted once before the HTTP cap or unknown usage stops Pi", async () => {
+  const full = await boundary("router", 10, true, false, true);
+  assert.equal(full.jevCalls, 2);
+  assert.equal(full.piCalls, 2);
+  assert.equal(full.row.jev.total, 44);
+  assert.equal(full.row.jev.complete, true);
+  assert.equal(full.budget.tokens, 44 + 216);
+  assert.equal(full.row.routeReports[0]?.batches?.coverageComplete, true);
+  assert.equal(full.row.jevAttempts?.length, 2);
+  const capped = await boundary("router", 1, true, false, true);
+  assert.equal(capped.jevCalls, 1);
+  assert.equal(capped.piCalls, 0);
+  assert.equal(capped.row.jev.total, 22);
+  assert.equal(capped.budget.tokens, 22);
+  assert.equal(capped.budget.requests, 1);
+  assert.equal(capped.row.routeReports[0]?.batches?.coverageComplete, false);
+  const unknown = await boundary("router", 10, true, false, true, true);
+  assert.equal(unknown.jevCalls, 2);
+  assert.equal(unknown.piCalls, 0);
+  assert.equal(unknown.row.jev.input, 40);
+  assert.equal(unknown.row.jev.output, 2);
+  assert.equal(unknown.row.jev.complete, false);
+  assert.equal(unknown.budget.tokens, 42);
+  assert.equal(unknown.budget.stopped, "unknown_usage");
 });
 
 test("sandbox namespace mapping and shell quoting do not execute text locally", () => {

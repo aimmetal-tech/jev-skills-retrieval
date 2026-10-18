@@ -8,8 +8,25 @@
 完整目录已到达 Jev 并返回 HTTP 400；延长超时不能解决该输入拒绝。
 随后核实服务错误码为 `max_tokens_exceeded`。Jev 1.14 默认整次请求 64k Token，
 共享 state 加单个问题 32k Token；没有独立问题数量限制。
-官方 262k 长上下文模式有速度/准确率影响，当前未开启，也尚未实现分批或预筛选。
+官方 262k 长上下文模式有速度/准确率影响，当前未开启。用户随后授权全量分批，
+并要求降低并发；现已实现**串行（并发 1）**，没有预筛选。
 修复后的测试使用新运行目录；不得与修复前的运行合并为同一被测版本。
+
+## 串行全量分批
+
+每批压缩前 JSON 最多 48,000 UTF-8 字节，state 加单题最多 24,000 字节，
+最多计划 128 次调用；全部原始候选及 Noul 文案保留。字节不是 Token 上界。
+每批成功并逐批记账后，再等待 1 秒派发下一批；失败不重试，也不自动拆分重发。
+单批 10 秒，完整评估阶段 590 秒，总路由 600 秒。日常插件仍为 10 秒评估/15 秒总计。
+正式 benchmark 的 `--task-timeout-ms` 建议至少 720000，为 Pi 执行留出时间；
+较小的显式上限仍照常生效，不会自动延长。
+
+`profile.ts` 是这套专用配置来源，并进入运行元数据和版本指纹。
+在完整目录真实 Jev 诊断通过前，不应启动全量 Pi 对比。
+全套 HTTP 预算需要先按每查询批次数核算；旧的 50000 上限未必足够。
+每次实际 HTTP 都在原预算门禁前预约，attempt 回调在下一批前结算/落盘。
+汇总报告不重复累加；保留成功部分的已知 Token，未知 usage 仍停止后续请求。
+逻辑 SDK 尝试可能在 fetch 前被预算拒绝，不计作实际 HTTP。
 
 当前交付包含数据准备、离线验证及运行/报告工具。用户已授权开始真实测试，
 并明确指定 Pi 的 OpenAI OAuth 账户、`gpt-6-luna` 和 **medium**。
@@ -138,10 +155,14 @@ npm run benchmark -- --report --output runs/full-001
 ## 输出与文件职责
 
 `npx tsx benchmark/diagnose-routing.ts --output diagnostics/local-a` 使用完整 SkillRet
-目录验证方案 A，本身不联网。加 `--live` 后最多发送一次 Jev 请求，不调用 Pi 聊天模型。
+目录验证请求快照与全量分批，本身不联网。加 `--live` 后最多发送 128 次串行 Jev 请求，
+不调用 Pi 聊天模型。输出目录必须全新，不能覆盖/混合旧证据。
 `--timeout-ms 3000` 可显式覆盖总上限；`--preparation-timeout-ms` 和
 `--evaluation-timeout-ms` 可覆盖分段上限。输出保存路径解析次数、候选摘要、分段耗时和 HTTP
 状态，不保存查询原文、凭据、请求或响应正文。失败调用的 Token 可能未知。
+`preparation.json` 列出计划批数/大小；`attempts.jsonl` 与 `partial.json` 逐批落盘；
+`result.json` 汇总整轮评分覆盖与已知/未知 usage。失败或 usage 不完整时退出非零。
+离线模式的 usage=0 是明确标记的夹具值，不能当作实际成本或模型效果。
 服务的 `max_tokens_exceeded` 通过白名单从 SDK 错误体提取到路由报告；其他任意错误正文
 仍不进入证据。限制依据见 [官方模型说明](https://docs.typesafe.ai/models#context-length)。
 这些诊断结果与正式检索/任务完成率报告分开。
@@ -154,5 +175,5 @@ npm run benchmark -- --report --output runs/full-001
 代码：`prepare.py` 下载与输入审计；`data.ts` 验证/原生技能发现；`run.ts` 调度/预算门禁；
 `pi.ts` 固定 Pi 会话与观测；`remote.ts`、`task-worker.ts`、`skillsbench.py` 负责容器桥接；
 `benchflow_compat.py` 为已验证的 Windows 容器路径修正；`metrics.ts` 与 `report.py` 计算和绘图；
-`selftest.ts` 验证无害 Docker 夹具；`diagnose-routing.ts` 诊断完整目录路由耗时。
+`selftest.ts` 验证无害 Docker 夹具；`diagnose-routing.ts` 诊断完整目录串行分批路由。
 来源锁、依赖锁与安全阻断清单在本目录。

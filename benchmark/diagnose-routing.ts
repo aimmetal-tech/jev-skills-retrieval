@@ -1,15 +1,17 @@
+import { appendFileSync, writeFileSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { DEFAULT_CONFIG } from "../src/config.ts";
+import { planBatches } from "../src/batching.ts";
 import { buildRoutingState } from "../src/context.ts";
 import { createJevEvaluator, type Evaluator } from "../src/jev-client.ts";
 import { route } from "../src/router.ts";
 import { prepareCatalog, skillIdentity } from "../src/selection.ts";
 import { contained, loadSkillret, sha256 } from "./data.ts";
+import { BENCHMARK_ROUTER_CONFIG as DEFAULT_CONFIG } from "./profile.ts";
 import { createBenchmarkTransport } from "./transport.ts";
 
-// Diagnostic only: one complete catalog, one query, at most one Jev HTTP request.
+// Diagnostic only: one complete catalog, one query, at most the configured serial batch request cap.
 // No Pi generation and no leaderboard/benchmark accuracy claims.
 const { values } = parseArgs({
   options: {
@@ -43,7 +45,8 @@ if (values.live && !process.env.TYPESAFE_API_KEY?.trim())
   throw new Error("Missing TYPESAFE_API_KEY; no request sent");
 const root = resolve(import.meta.dirname, "..");
 const output = contained(resolve(root, "outputs/benchmark"), values.output);
-await mkdir(output, { recursive: true });
+await mkdir(dirname(output), { recursive: true });
+await mkdir(output); // Evidence directories are never mixed or overwritten.
 const loaded = await loadSkillret(resolve(root, "outputs/benchmark/data"));
 const query = loaded.queries[0];
 if (!query) throw new Error("No query");
@@ -58,23 +61,37 @@ const prepared = prepareCatalog(loaded.catalog, {
 const preparationMs = performance.now() - started;
 const config = {
   ...DEFAULT_CONFIG,
+  ...(!values.live ? { batchIntervalMs: 0 } : {}),
   routeTimeoutMs: Number(values["timeout-ms"]),
   preparationTimeoutMs: Number(values["preparation-timeout-ms"]),
   evaluationTimeoutMs: Number(values["evaluation-timeout-ms"]),
 };
 const evidence = {
   kind: values.live
-    ? "live-single-jev-routing-diagnostic"
+    ? "live-batched-jev-routing-diagnostic"
     : "offline-routing-diagnostic",
   startedAt: new Date().toISOString(),
   catalogSize: prepared.catalog.length,
   candidateDigest: sha256(JSON.stringify(prepared.candidates.map((c) => c.id))),
+  plannedBatches: planBatches(
+    {
+      state: buildRoutingState(query.query, [], [], config),
+      candidates: prepared.candidates,
+      ...(config.model ? { model: config.model } : {}),
+    },
+    config,
+  ).map((b) => ({ count: b.candidates.length, payloadBytes: b.payloadBytes })),
   sourceDigest: sha256(
     (
       await Promise.all(
-        ["selection.ts", "router.ts", "config.ts", "pi-adapter.ts"].map(
-          (file) => readFile(resolve(root, "src", file), "utf8"),
-        ),
+        [
+          "selection.ts",
+          "router.ts",
+          "config.ts",
+          "pi-adapter.ts",
+          "jev-client.ts",
+          "batching.ts",
+        ].map((file) => readFile(resolve(root, "src", file), "utf8")),
       )
     ).join("\n"),
   ),
@@ -82,7 +99,7 @@ const evidence = {
   config,
   preparationMs,
   canonicalLookups,
-  note: "One diagnostic query; no Pi model or task execution. Failed requests may have unknown token usage.",
+  note: "One full-catalog diagnostic query; serial batched Jev, no Pi model or task execution. Offline usage is a zero-valued fixture. Failed requests may have unknown token usage.",
 };
 await writeFile(
   resolve(output, "preparation.json"),
@@ -97,7 +114,8 @@ let requestBytes: number | null = null;
 const evaluate: Evaluator = values.live
   ? createJevEvaluator({
       fetch: async (input, init) => {
-        if (requests >= 1) throw new Error("Diagnostic request cap");
+        if (requests >= config.batchMaxRequests)
+          throw new Error("Diagnostic request cap");
         requests++;
         fetchStartedMs = performance.now() - started;
         if (typeof init?.body === "string")
@@ -113,7 +131,7 @@ const evaluate: Evaluator = values.live
   : async ({ candidates }) => ({
       probabilities: Object.fromEntries(candidates.map((c) => [c.id, 0])),
       model: "offline-fixture-no-network",
-      usage: { input_tokens: null, output_tokens: null },
+      usage: { input_tokens: 0, output_tokens: 0 },
     });
 try {
   const result = await route(
@@ -126,6 +144,16 @@ try {
       config,
       signal: undefined,
       issues: prepared.issues,
+      onAttempt: (attempt) => {
+        appendFileSync(
+          resolve(output, "attempts.jsonl"),
+          `${JSON.stringify(attempt)}\n`,
+        );
+        writeFileSync(
+          resolve(output, "partial.json"),
+          JSON.stringify({ ...evidence, requests, attempt }, null, 2),
+        );
+      },
     },
     evaluate,
   );
@@ -148,6 +176,12 @@ try {
     JSON.stringify(report, null, 2),
   );
   console.log(JSON.stringify(report, null, 2));
+  if (
+    result.report.status !== "selected" ||
+    !result.report.batches?.coverageComplete ||
+    !result.report.batches.usageComplete
+  )
+    process.exitCode = 1;
 } finally {
   await transport.close();
 }

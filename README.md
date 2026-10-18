@@ -108,6 +108,11 @@ Base URL 是 Jev 服务地址；它不会配置系统 HTTP 代理。
   "routeTimeoutMs": 15000,
   "preparationTimeoutMs": 5000,
   "evaluationTimeoutMs": 10000,
+  "batchMaxPayloadBytes": 48000,
+  "batchMaxPairBytes": 24000,
+  "batchMaxRequests": 128,
+  "batchTimeoutMs": 10000,
+  "batchIntervalMs": 1000,
   "model": "jev-1.14.0",
   "baseUrl": "https://api.typesafe.ai"
 }
@@ -126,6 +131,19 @@ Base URL 是 Jev 服务地址；它不会配置系统 HTTP 代理。
 
 默认参数是试验初值，并非实测最优值。模型按用户要求固定为 `jev-1.14.0`；
 修改 `model` 可以切换版本。每轮仍记录服务实际返回的模型版本和 token usage。
+
+全量候选现在自动按请求体大小分批，**并发固定为 1**，每批完成后默认等待 1 秒。
+所有批次使用同一共享 state、原始 Noul 文案及稳定候选 ID。全部评分成功后统一执行
+阈值、Top 5 和 metadata 预算；没有 BM25/向量预筛选，不做自动重试。
+48,000/24,000 是压缩前完整 JSON 的 UTF-8 **字节保护**，不是精确 Jev Token 上界。
+state 加单题过大、计划超过 128 批时，在网络请求前明确回退，不截断原文或丢候选。
+字节预算不保证不会被服务拒绝；需要真实 usage 校准。单并发和间隔也不保证符合组织的
+Token/请求速率限制，更不限制其他进程的并发。
+
+日常总时限仍为 15 秒，大目录需要显式配置更长的评估及总时限。
+benchmark 使用独立配置（评估 590 秒、总计 600 秒），详见 benchmark/README.md。
+分批报告分别记录计划/完成批数、评分覆盖、已知 usage 和 usage 是否完整。
+任一批失败或中途 usage 未知时停止后续批次；不把未评分候选当零分。
 
 ## 故障与诊断
 
@@ -152,8 +170,9 @@ Pi 会话的 `jev-skill-router` 自定义条目
   默认本地准备上限 5 秒、Jev 评估上限 10 秒、总上限 15 秒；保留 `routeTimeoutMs`
   作为总上限，旧配置仍会生效。评估包含 SDK 构造、网络、响应解析与校验。
   本地同步文件调用不能由 JS 定时器强行中断，完成后检查上限，超限不发 Jev 请求。
-  `timeoutPhase` 指出触发的是 preparation、evaluation 或 total。
-  SDK 重试固定为 0。超大目录目前不分批，服务拒绝时明确降级。
+  `timeoutPhase` 指出触发的是 preparation、batch、evaluation 或 total。
+  单批上限包含 SDK、网络和解析；阶段上限也包含批次间等待。SDK 重试固定为 0。
+  已产生的批次 usage 在后续失败时仍保留，未知用量不能当零。
 - 取消沿用 Pi 语义，不重启工作。Pi 1.3.0 在 `before_agent_start` 阶段可能
   没有暴露操作 signal，因此启动时取消可能等待本次路由 deadline；真实
   Pi 测试确认取消后不会发起 provider 请求。

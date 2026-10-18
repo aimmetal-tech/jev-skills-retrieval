@@ -69,14 +69,16 @@ test("a full request resolves each path once and reuses candidate IDs through se
     pinned: [],
     prepared,
     state,
-    config,
+    config: { ...config, batchIntervalMs: 0 },
     signal: undefined,
     issues: [],
   };
   const success = await route(request, async ({ candidates }) => {
-    assert.equal(candidates, prepared.candidates);
+    assert(candidates.every((c) => prepared.candidates.includes(c)));
     return {
-      probabilities: { [candidates[0]?.id as string]: 0.9 },
+      probabilities: Object.fromEntries(
+        candidates.map((c) => [c.id, c.skill === skills[0] ? 0.9 : 0]),
+      ),
       model: "test",
       usage: { input_tokens: 1, output_tokens: 1 },
     };
@@ -391,6 +393,8 @@ test("configuration merges project scalars and unions relative pins; bad fields 
         model: "jev-project-override",
         preparationTimeoutMs: 7000,
         evaluationTimeoutMs: 8000,
+        batchMaxRequests: 64,
+        batchIntervalMs: 0,
         pinnedSkillPaths: ["../shared/SKILL.md", "./skills/x/SKILL.md"],
       }),
     );
@@ -401,6 +405,8 @@ test("configuration merges project scalars and unions relative pins; bad fields 
     assert.equal(loaded.config.model, "jev-project-override");
     assert.equal(loaded.config.preparationTimeoutMs, 7000);
     assert.equal(loaded.config.evaluationTimeoutMs, 8000);
+    assert.equal(loaded.config.batchMaxRequests, 64);
+    assert.equal(loaded.config.batchIntervalMs, 0);
     assert.deepEqual(loaded.config.pinnedSkillPaths, [
       join(root, "shared/SKILL.md"),
       join(root, ".pi/skills/x/SKILL.md"),
@@ -411,13 +417,15 @@ test("configuration merges project scalars and unions relative pins; bad fields 
         routeTimeoutMs: -1,
         preparationTimeoutMs: 0,
         evaluationTimeoutMs: 2147483648,
+        batchMaxRequests: 0,
+        batchIntervalMs: -1,
         minProbability: 2,
         pinnedSkillPaths: ["./skills/x/SKILL.md", null],
         apiKey: "must-not-echo",
       }),
     );
     const invalid = loadConfig(root, agent);
-    assert.equal(invalid.issues.length, 6);
+    assert.equal(invalid.issues.length, 8);
     assert.equal(
       invalid.config.preparationTimeoutMs,
       DEFAULT_CONFIG.preparationTimeoutMs,

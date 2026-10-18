@@ -1,3 +1,4 @@
+import type { BatchAttempt } from "../src/batching.ts";
 import type { RouteReport } from "../src/router.ts";
 
 export type Group = "native" | "router";
@@ -59,6 +60,7 @@ export interface Trial {
   reads: ReadEvidence[];
   relevantIds: string[];
   routeReports: RouteReport[];
+  jevAttempts?: BatchAttempt[];
   pi: Counts;
   jev: Counts;
   requests: { pi: number; jev: number };

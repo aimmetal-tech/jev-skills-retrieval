@@ -1,4 +1,11 @@
 import type { Skill } from "@earendil-works/pi-coding-agent";
+import {
+  type BatchAttempt,
+  BatchFailure,
+  type BatchReport,
+  batchUsage,
+  evaluateBatches,
+} from "./batching.ts";
 import type { RouterConfig } from "./config.ts";
 import type { RoutingState } from "./context.ts";
 import {
@@ -19,7 +26,8 @@ export interface RouteReport {
   message?: string;
   httpStatus?: number;
   serviceErrorType?: RoutingFailure["serviceErrorType"];
-  timeoutPhase?: "preparation" | "evaluation" | "total";
+  timeoutPhase?: "preparation" | "evaluation" | "total" | "batch";
+  batches?: BatchReport;
   elapsedMs: number;
   timings?: {
     preparationMs: number;
@@ -46,6 +54,7 @@ export interface RouteRequest {
   prepared?: CatalogSnapshot;
   /** Local preparation only; credential input/crypto waiting is excluded. */
   preparationMs?: number;
+  onAttempt?: (attempt: BatchAttempt) => void;
 }
 
 export async function route(
@@ -76,10 +85,11 @@ export async function route(
   };
   const elapsed = () => priorPreparationMs + performance.now() - started;
   const controller = new AbortController();
-  let timer: ReturnType<typeof setTimeout> | undefined;
   let onAbort: (() => void) | undefined;
   let timeoutPhase: RouteReport["timeoutPhase"];
   let observedResult: EvaluationResult | undefined;
+  let batches: BatchReport | undefined;
+  let deadlinePhase: "evaluation" | "total" = "evaluation";
   const report = (
     status: RouteReport["status"],
     skills: Skill[],
@@ -90,6 +100,8 @@ export async function route(
       status,
       elapsedMs: elapsed(),
       timings: { ...timings },
+      ...(batches ? { batches } : {}),
+      ...(batches?.attempts.length ? { usage: batchUsage(batches) } : {}),
       candidateCount: candidates.length,
       selectedCount: skills.length,
       ...extra,
@@ -106,9 +118,7 @@ export async function route(
       request.config.autoMetadataMaxChars === 0
     )
       return report("selected", [...request.pinned]);
-    const timeoutFailure = (
-      phase: NonNullable<RouteReport["timeoutPhase"]>,
-    ) => {
+    const timeoutFailure = (phase: "preparation" | "evaluation" | "total") => {
       timeoutPhase = phase;
       controller.abort();
       return new RoutingFailure(
@@ -128,26 +138,15 @@ export async function route(
       remainingMs,
       request.config.evaluationTimeoutMs,
     );
-    const deadlinePhase = evaluationMs < remainingMs ? "evaluation" : "total";
-    // SDK construction, transport, body parsing and validation share this cap.
-    const deadline = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => {
-        controller.abort();
-        reject(timeoutFailure(deadlinePhase));
-      }, evaluationMs);
-      onAbort = () => {
-        controller.abort();
-        reject(new Error("cancelled"));
-      };
-      request.signal?.addEventListener("abort", onAbort, { once: true });
-      if (request.signal?.aborted) onAbort();
-    });
+    deadlinePhase = evaluationMs < remainingMs ? "evaluation" : "total";
+    onAbort = () => controller.abort();
+    request.signal?.addEventListener("abort", onAbort, { once: true });
+    if (request.signal?.aborted) controller.abort();
     const evaluationStarted = performance.now();
     let result: EvaluationResult;
     try {
-      result = await Promise.race([
-        deadline,
-        evaluate({
+      const evaluated = await evaluateBatches(
+        {
           state: request.state,
           candidates,
           signal: controller.signal,
@@ -156,8 +155,13 @@ export async function route(
           ...(request.config.baseUrl
             ? { baseUrl: request.config.baseUrl }
             : {}),
-        }),
-      ]);
+        },
+        evaluate,
+        request.config,
+        request.onAttempt,
+      );
+      result = evaluated;
+      batches = evaluated.batches;
       observedResult = result;
     } finally {
       timings.evaluationMs = performance.now() - evaluationStarted;
@@ -181,6 +185,11 @@ export async function route(
       usage: result.usage,
     });
   } catch (error) {
+    if (error instanceof BatchFailure) {
+      batches = error.batches;
+      if (error.code === "timeout")
+        timeoutPhase = error.phase === "batch" ? "batch" : deadlinePhase;
+    }
     if (request.signal?.aborted) return cancelled();
     const failure =
       error instanceof RoutingFailure
@@ -195,6 +204,7 @@ export async function route(
         ...(failure.serviceErrorType
           ? { serviceErrorType: failure.serviceErrorType }
           : {}),
+        ...(batches?.attempts.length ? { usage: batchUsage(batches) } : {}),
         ...(observedResult
           ? { model: observedResult.model, usage: observedResult.usage }
           : {}),
@@ -207,7 +217,6 @@ export async function route(
       },
     );
   } finally {
-    if (timer) clearTimeout(timer);
     if (onAbort) request.signal?.removeEventListener("abort", onAbort);
   }
 }

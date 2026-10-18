@@ -14,6 +14,11 @@ export interface RouterConfig {
   routeTimeoutMs: number;
   preparationTimeoutMs: number;
   evaluationTimeoutMs: number;
+  batchMaxPayloadBytes: number;
+  batchMaxPairBytes: number;
+  batchMaxRequests: number;
+  batchTimeoutMs: number;
+  batchIntervalMs: number;
   model?: string;
   baseUrl?: string;
 }
@@ -28,6 +33,11 @@ export const DEFAULT_CONFIG: Readonly<RouterConfig> = Object.freeze({
   routeTimeoutMs: 15000,
   preparationTimeoutMs: 5000,
   evaluationTimeoutMs: 10000,
+  batchMaxPayloadBytes: 48000,
+  batchMaxPairBytes: 24000,
+  batchMaxRequests: 128,
+  batchTimeoutMs: 10000,
+  batchIntervalMs: 1000,
   model: "jev-1.14.0",
 });
 
@@ -44,6 +54,11 @@ const integerKeys = new Set([
   "routeTimeoutMs",
   "preparationTimeoutMs",
   "evaluationTimeoutMs",
+  "batchMaxPayloadBytes",
+  "batchMaxPairBytes",
+  "batchMaxRequests",
+  "batchTimeoutMs",
+  "batchIntervalMs",
 ]);
 
 export function loadConfig(cwd: string, agentDir: string): LoadedConfig {
@@ -75,8 +90,14 @@ export function loadConfig(cwd: string, agentDir: string): LoadedConfig {
     for (const [key, item] of Object.entries(value)) {
       const invalid = () => issues.push(`Invalid ${key} in ${file}`);
       if (integerKeys.has(key)) {
-        const isTimeout = key.endsWith("TimeoutMs");
-        const minimum = isTimeout ? 1 : 0;
+        const isTimeout =
+          key.endsWith("TimeoutMs") || key === "batchIntervalMs";
+        const minimum =
+          key === "batchIntervalMs"
+            ? 0
+            : key.startsWith("batch") || isTimeout
+              ? 1
+              : 0;
         if (
           typeof item !== "number" ||
           !Number.isSafeInteger(item) ||

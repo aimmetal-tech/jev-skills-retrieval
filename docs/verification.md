@@ -257,3 +257,43 @@ OAuth、medium。原生账户工具预检成功，首轮真实 SkillRet 运行�
 复现：`npx tsx benchmark/diagnose-routing.ts --output diagnostics/new-local`；
 加 `--live` 最多调用一次真实 Jev，不启动 Pi 模型。超时参数见 benchmark/README.md。
 所有相对证据路径以 `outputs/benchmark/diagnostics/` 为根目录。
+
+## 全量串行分批实现与真实 Jev 验证（2026-10-18）
+
+用户授权实施全量分批并降低并发。现在固定**并发 1**，每批结算后默认等待 1 秒；
+保持原始 Noul 文案、全候选覆盖、稳定 ID、阈值 0.65、Top 5 和 4,000 字符预算。
+不启用长上下文、预筛选、自动二分或重试。所有批次成功后才进行全局选择。
+任意批次失败明确回退，缺 key 和用户取消仍保留原阻塞/取消行为。
+
+`src/batching.ts` 负责完整装包、串行调度、批次/整轮取消、评分集合校验及安全证据。
+SDK 共享请求构造器用于精确测量压缩前 JSON 的 UTF-8 字节；默认每批 48,000、
+state 加单题 24,000 字节，最多 128 批。这是工程保护，并非已经验证的 Jev Token 上界。
+当前账户的 TPS/RPS 未读取；串行和间隔不能保证所有负载都不会限流。
+
+benchmark 使用独立 `profile.ts`（评估 590 秒、总路由 600 秒），日常默认保持
+评估 10 秒、总计 15 秒。CLI 提供的任务时限始终生效，大目录需要显式留出 Pi 时间。
+逐批 attempt 回调在下一批前记账和落盘，整轮报告不重复累加。HTTP 上限仍在 fetch
+之前执行；已知部分 usage 不丢弃，未知 usage 或永久 HTTP 错误仍停止后续流量。
+
+验证结果：
+
+- `npm run check`：78 项测试、TypeScript、Biome 和生产构建通过。
+  新增测试覆盖全 6,006 项的精确装包与覆盖、SDK 串行/间隔/记账顺序、全局选择、
+  失败及未知用量、模型不一致、批次/阶段/总时限、SDK 超时归因和取消。
+  真实 Pi 回环 HTTP 边界验证分批 usage 不重复统计，以及预算/未知 usage 停止后续调用。
+- `npm run verify:package`：40 文件的包由 Pi 1.3.0 真正加载，未调用模型。
+- 离线完整目录：75/75 批、6,006/6,006 项完成，规范路径解析 6,006 次，
+  实际 HTTP=0。零值 usage 是标记明确的夹具，不是模型成本或效果证据。
+  证据：`outputs/benchmark/diagnostics/serial-batches-offline/result.json`。
+- 真实完整目录单查询：75/75 次串行 HTTP 调用成功，6,006 项评分齐全，
+  所有返回模型均为 `jev-1.14.0`，全局选出 5 项；没有 Token 超限、429 或超时。
+  总路由时间 **101,107.0603 ms**，最大批次压缩前 JSON **47,999 字节**。
+  实际 usage：输入 **607,463**、输出 **441,084**，合计 **1,048,547** Token，usage 完整。
+  证据：`outputs/benchmark/diagnostics/serial-batches-live-20261018/` 下
+  `preparation.json`、`attempts.jsonl`、`partial.json`、`result.json`。
+  成功诊断后仅补充了 SDK 提前超时的阶段归因，不改变装包、成功路径或实测参数。
+
+真实调用只执行 Jev 路由，没有 Pi 聊天生成。这是一个查询的完整目录可行性证据，
+不是 4,392 条查询的正确率、端到端任务通过率或 Token 节省结论；没有据此估算账单。
+正式运行仍需独立新目录、按完整查询计划重新核算 HTTP 保护参数及任务时限。
+SkillsBench 的既有安全隔离不受本次改动影响，仍保留原始 87 任务分母。

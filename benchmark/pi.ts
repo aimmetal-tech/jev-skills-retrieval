@@ -14,13 +14,13 @@ import {
   type Skill,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { DEFAULT_CONFIG } from "../src/config.ts";
 import {
   type AdapterDependencies,
   createSkillRouterExtension,
 } from "../src/pi-adapter.ts";
 import { skillIdentity } from "../src/selection.ts";
 import type { Budget } from "./budget.ts";
+import { BENCHMARK_ROUTER_CONFIG } from "./profile.ts";
 import { emptyCounts, type Group, type Suite, type Trial } from "./types.ts";
 
 export interface PiTrialOptions {
@@ -78,6 +78,8 @@ export async function runPiTrial(options: PiTrialOptions): Promise<Trial> {
   let rawUsageSeen = false;
   let streamWasSent = false;
   let accountedPi = 0;
+  let accountedJev = 0;
+  let unknownJevUsage = false;
   let assistantMessages = 0;
   let turns = 0;
   const checkpoint = () => {
@@ -137,29 +139,42 @@ export async function runPiTrial(options: PiTrialOptions): Promise<Trial> {
       createSkillRouterExtension({
         getApiKey: () => process.env.TYPESAFE_API_KEY,
         configuration: () => ({
-          config: { ...DEFAULT_CONFIG, pinnedSkillPaths: [] },
+          config: { ...BENCHMARK_ROUTER_CONFIG, pinnedSkillPaths: [] },
           issues: [],
         }),
         fetch: guardedJev,
         ...options.routerDependencies,
+        onAttempt: (attempt) => {
+          row.jevAttempts ??= [];
+          row.jevAttempts.push(attempt);
+          // Logical calls rejected by the HTTP cap did not send another request.
+          if (row.requests.jev > accountedJev) {
+            accountedJev++;
+            const { input_tokens: input, output_tokens: output } =
+              attempt.usage;
+            row.jev.input += input ?? 0;
+            row.jev.output += output ?? 0;
+            const known = (input ?? 0) + (output ?? 0);
+            row.jev.total += known;
+            budget.account(known);
+            if (input === null || output === null) {
+              unknownJevUsage = true;
+              budget.account(null);
+            }
+            row.jev.complete =
+              !unknownJevUsage && accountedJev === row.requests.jev;
+          }
+          checkpoint();
+          options.routerDependencies?.onAttempt?.(attempt);
+        },
         onReport: (report) => {
           row.routeReports.push(report);
-          if (
-            report.usage?.input_tokens != null &&
-            report.usage.output_tokens != null
-          ) {
-            const count =
-              report.usage.input_tokens + report.usage.output_tokens;
-            row.jev.input += report.usage.input_tokens;
-            row.jev.output += report.usage.output_tokens;
-            row.jev.total += count;
-            row.jev.complete = true;
-            budget.account(count);
-          } else if (row.requests.jev > 0) {
+          if (accountedJev < row.requests.jev) {
             row.jev.complete = false;
             budget.account(null);
           }
           checkpoint();
+          options.routerDependencies?.onReport?.(report);
         },
       }),
     );
