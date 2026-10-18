@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
@@ -45,6 +46,54 @@ const answer = () =>
     answers: { q: { type: "noul", noul: 0.9 } },
     usage: { input_tokens: 10, output_tokens: 2 },
   });
+
+test("atomic checkpoints tolerate a brief Windows reader that denies file replacement", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "jev-checkpoint-reader-"));
+  const path = resolve(root, "state.json");
+  atomicJson(path, { version: 1 });
+  try {
+    if (process.platform === "win32") {
+      const child = spawn(
+        resolve(
+          process.env.SystemRoot ?? "C:/Windows",
+          "System32/WindowsPowerShell/v1.0/powershell.exe",
+        ),
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-EncodedCommand",
+          Buffer.from(
+            "$s = [IO.File]::Open($env:JEV_TEST_FILE, 'Open', 'Read', 'ReadWrite'); [Console]::WriteLine('LOCKED'); [Threading.Thread]::Sleep(400); $s.Dispose()",
+            "utf16le",
+          ).toString("base64"),
+        ],
+        {
+          windowsHide: true,
+          env: { SystemRoot: process.env.SystemRoot, JEV_TEST_FILE: path },
+          stdio: ["ignore", "pipe", "ignore"],
+        },
+      );
+      const closed = new Promise<void>((done) =>
+        child.once("exit", () => done()),
+      );
+      await new Promise<void>((done, reject) => {
+        child.once("error", reject);
+        child.stdout.once("data", () => done());
+        child.once("exit", (code) => {
+          if (code) reject(new Error("fixture_reader_failed"));
+        });
+      });
+      try {
+        atomicJson(path, { version: 2 });
+      } finally {
+        await closed;
+      }
+    } else atomicJson(path, { version: 2 });
+    assert.equal(JSON.parse(await readFile(path, "utf8")).version, 2);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("durable paid responses restore scores without another HTTP request or double accounting", async () => {
   const root = await mkdtemp(resolve(tmpdir(), "jev-receipts-"));

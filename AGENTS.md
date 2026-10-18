@@ -89,6 +89,8 @@ to `~/.jev-skill-router/credentials.json`; never to project config or session da
   pending HTTP reservations, sanitized attempt usage, hashes and locally retained
   successful real provider bodies. Matching responses replay into a fresh Pi
   session without another paid request; authorization/cookies are never saved.
+  Windows atomic replacements tolerate transient reader locks for up to 2s;
+  persistent checkpoint/observer writes stop further HTTP with checkpoint_failure.
   `recovery.ts` owns the run lease (Windows native named mutex via a hidden helper;
   POSIX loopback lease), fsynced result journal and conservative torn-tail repair.
   `psmux.ps1` starts a detached named psmux session with a fresh output directory

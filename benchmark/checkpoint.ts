@@ -52,7 +52,25 @@ export function atomicJson(path: string, value: unknown) {
   } finally {
     closeSync(fd);
   }
-  renameSync(temporary, path);
+  // Windows readers (including status tools) can briefly deny FILE_SHARE_DELETE.
+  // Retry only the local atomic replacement; never reissue a provider request.
+  const until = performance.now() + 2000;
+  for (;;) {
+    try {
+      renameSync(temporary, path);
+      break;
+    } catch (error) {
+      if (
+        process.platform !== "win32" ||
+        !["EPERM", "EACCES", "EBUSY"].includes(
+          (error as NodeJS.ErrnoException).code ?? "",
+        ) ||
+        performance.now() >= until
+      )
+        throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+    }
+  }
 }
 
 export interface HttpAttempt {
@@ -244,7 +262,15 @@ export class TrialCheckpoint {
       throw new Error("checkpoint_write_failed");
     }
     this.saveManifest();
-    this.onChange?.();
+    this.changed();
+  }
+  private changed() {
+    try {
+      this.onChange?.();
+    } catch {
+      this.budget.stopped = "checkpoint_failure";
+      throw new Error("checkpoint_write_failed");
+    }
   }
   private validateCache(receipt: Receipt) {
     if (
@@ -287,10 +313,15 @@ export class TrialCheckpoint {
   }
   finish(row: Trial) {
     this.saveManifest();
-    atomicJson(resolve(this.directory, "final.json"), {
-      scope: this.scope,
-      row,
-    });
+    try {
+      atomicJson(resolve(this.directory, "final.json"), {
+        scope: this.scope,
+        row,
+      });
+    } catch {
+      this.budget.stopped = "checkpoint_failure";
+      throw new Error("checkpoint_write_failed");
+    }
   }
   final(): Trial | undefined {
     const path = resolve(this.directory, "final.json");
@@ -350,7 +381,7 @@ export class TrialCheckpoint {
         this.validateCache(receipt);
         this.replayed[kind]++;
         this.saveManifest();
-        this.onChange?.();
+        this.changed();
         return new Response(Buffer.from(receipt.response.base64, "base64"), {
           status: receipt.response.status,
           headers: { "content-type": receipt.response.contentType },
