@@ -57,7 +57,7 @@ if (!values.live) {
         config: {
           threshold,
           timeoutMs: timeout,
-          model: values.model ?? "SDK default",
+          model: values.model ?? DEFAULT_CONFIG.model,
         },
         note: "Use --live to call Jev; no accuracy or latency is measured in preview mode.",
       },

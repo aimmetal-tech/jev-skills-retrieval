@@ -18,6 +18,7 @@ resumed pre-extension sessions, other harnesses, or removal of historical skills
   sanitized failure codes, actual model version and token usage.
 - `src/context.ts`: raw current input, bounded visible conversation and prior metadata.
 - `src/config.ts`: defaults and validated user/project configuration merge.
+  Its explicit model default is shared by routing and evaluation.
 - `tests/*.test.ts`: core and real Pi provider-boundary integration tests.
 - `eval/dataset.ts`: eight bounded synthetic metadata evaluation cases.
 - `eval/run.ts`: preview by default; explicit `--live` runs real Jev requests and
@@ -51,6 +52,9 @@ the latest report without raw task text or credentials.
 - Generic LLM integrations, if introduced later, prefer `LLM_API_KEY`,
   `LLM_BASE_URL`, and OpenAI Chat Completions. V1 needs no generic LLM call.
 - Use the official TypeSafe JavaScript SDK. Zero retries and one total deadline.
+- Default routing and evaluation model is explicitly `jev-1.14.0`, as requested
+  by the user. User/project `model` and evaluation `--model` may override it;
+  the SDK environment default must not silently replace the chosen version.
 - Compatibility baseline: `@earendil-works/pi-coding-agent@1.3.0`, specification
   source commit `482c1381a00d8d00bc81697e4a980c593db6803e`.
 
@@ -67,7 +71,8 @@ the latest report without raw task text or credentials.
 - Explicit proxy diagnosis used process-local Undici `ProxyAgent` bound to
   `http://127.0.0.1:7688`, with no direct fallback. Reproduction is documented in
   `docs/verification.md`; evidence is in `outputs/proxy-7688-probe.json` and
-  `outputs/evaluation-proxy-7688.json`. The default extension does not yet enable
+  `outputs/evaluation-proxy-7688.json`; the requested `jev-1.14.0` evaluation is
+  in `outputs/evaluation-jev-1.14.0-proxy-7688.json`. The default extension does not yet enable
   a proxy automatically. Do not confuse sandbox elevation with proxy routing.
 - `npm pack --dry-run`: inspect package contents (runs the build).
 - `npm run verify:package`: build and create `outputs/jev-skill-router-0.1.0.tgz`,

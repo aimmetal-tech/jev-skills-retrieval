@@ -57,9 +57,19 @@ Pi OpenAI 适配层可把结构化 prompt 更新折叠为首条 system message�
 本次真实推理不再受到 451 阻塞。当前验证仅为测试进程注入代理，**没有修改
 扩展默认入口的代理行为，也没有写入系统代理设置**。
 
-这 8 个合成用例不能代表真实目录的广泛准确率，也不足以确定最优阈值或
-稳定延迟分位数。保留 0.65 初值和 SDK 默认模型，不自动锁定版本。
-任务完成率、真实目录召回、缓存表现和实际账单费用仍未验证。
+上述结果是最初使用 SDK 默认模型的观测。随后按用户要求，默认模型改为
+显式 `jev-1.14.0`。通过同一 7688 代理再次运行 8 个用例，实际返回模型
+均为 `jev-1.14.0`，全部成功，无回退、无误选，必需技能召回为 8/8。
+本次 p50 / p95 为 263.9 / 578.1 毫秒，输入 / 输出 token 为 6319 / 4680。
+新报告保存在 `outputs/evaluation-jev-1.14.0-proxy-7688.json`，旧版本报告保留。
+
+扩展配置与评测共享这个默认值；两层 `model` 配置与评测 `--model` 可以
+显式覆盖。默认请求会携带模型版本，不受 SDK 模型别名或环境默认值漂移影响。
+离线测试检查实际 SDK 序列化的 model 字段，以及服务返回版本的独立记录。
+
+这些小样本不能代表真实目录的广泛准确率，也不足以确定最优阈值、稳定延迟
+分位数或两版本的速度差异。阈值暂时保留 0.65；任务完成率、真实目录召回、
+缓存表现和实际账单费用仍未验证。
 
 临时代理评测的执行方式如下；仅影响当前 Node 进程：
 
@@ -68,7 +78,7 @@ node --import tsx --input-type=module -e '
 import { ProxyAgent, fetch } from "undici";
 const agent = new ProxyAgent("http://127.0.0.1:7688");
 globalThis.fetch = (url, init = {}) => fetch(url, { ...init, dispatcher: agent });
-process.argv = [process.execPath, "--live", "--output", "outputs/evaluation-proxy-7688.json"];
+process.argv = [process.execPath, "--live", "--output", "outputs/evaluation-jev-1.14.0-proxy-7688.json"];
 try { await import("./eval/run.ts"); }
 finally { await agent.destroy(); }
 '

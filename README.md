@@ -36,8 +36,9 @@ pi -e ./dist/pi-adapter.js
 
 Jev 只从 `TYPESAFE_API_KEY` 读取 key；无需 `LLM_API_KEY`。
 采用官方 `@typesafe-ai/sdk@0.7.0`，请求一个批次，每个候选独立 Noul。
-SDK 自身的 `TYPESAFE_BASE_URL` 和 `TYPESAFE_DEFAULT_MODEL` 仍可用；配置中的
-`model` 优先。扩展关闭 SDK 日志，避免日志级别环境变量意外输出聊天内容。
+SDK 自身的 `TYPESAFE_BASE_URL` 仍可用。模型默认显式指定 `jev-1.14.0`，
+可通过两层配置的 `model` 或评测的 `--model` 覆盖；不会被 SDK 的
+`TYPESAFE_DEFAULT_MODEL` 改成其他模型。扩展关闭 SDK 日志，避免意外输出聊天内容。
 
 ## 配置
 
@@ -54,7 +55,8 @@ SDK 自身的 `TYPESAFE_BASE_URL` 和 `TYPESAFE_DEFAULT_MODEL` 仍可用；配�
   "autoMetadataMaxChars": 4000,
   "pinnedSkillPaths": ["./skills/my-skill/SKILL.md"],
   "minProbability": 0.65,
-  "routeTimeoutMs": 3000
+  "routeTimeoutMs": 3000,
+  "model": "jev-1.14.0"
 }
 ```
 
@@ -69,8 +71,8 @@ SDK 自身的 `TYPESAFE_BASE_URL` 和 `TYPESAFE_DEFAULT_MODEL` 仍可用；配�
 数量、字符预算可设为 0 来关闭对应自动部分。字符按 JavaScript UTF-16
 长度计算，并非 token。当前用户原文不截断；历史从近到远取，截断有标记。
 
-默认参数是试验初值，并非实测最优值。可加 `"model": "已校准的模型版本"`
-锁定模型；每轮记录服务实际返回的模型版本和 token usage。
+默认参数是试验初值，并非实测最优值。模型按用户要求固定为 `jev-1.14.0`；
+修改 `model` 可以切换版本。每轮仍记录服务实际返回的模型版本和 token usage。
 
 ## 故障与诊断
 
@@ -126,8 +128,8 @@ npm run eval -- --live --output outputs/evaluation.json
 
 **2026-10-18 实测状态：** 本地功能检查与打包加载已验证。沙盒外未明确指定
 代理时遇到 HTTP 451；显式通过 `http://127.0.0.1:7688` 后，真实模型
-`jev-1.13.0` 成功完成全部 8 个合成用例，无回退、无误选，必需技能召回 8/8；
-本次 p50 为 265.9 毫秒，p95 为 644.7 毫秒。
+`jev-1.14.0` 成功完成全部 8 个合成用例，无回退、无误选，必需技能召回 8/8；
+本次 p50 为 263.9 毫秒，p95 为 578.1 毫秒。
 
 代理仅注入本次测试进程，扩展默认入口尚未配置为自动使用系统代理。
 小样本结果不能代表真实目录或最优阈值；任务完成率、缓存和账单费用仍待验收。

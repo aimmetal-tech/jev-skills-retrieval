@@ -22,6 +22,7 @@ export const DEFAULT_CONFIG: Readonly<RouterConfig> = Object.freeze({
   pinnedSkillPaths: [],
   minProbability: 0.65,
   routeTimeoutMs: 3000,
+  model: "jev-1.14.0",
 });
 
 export interface LoadedConfig {

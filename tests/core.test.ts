@@ -152,11 +152,13 @@ test("configuration merges project scalars and unions relative pins; bad fields 
     const agent = join(root, "agent");
     await mkdir(agent);
     await mkdir(join(root, ".pi"));
+    assert.equal(loadConfig(root, agent).config.model, "jev-1.14.0");
     await writeFile(
       join(agent, "skill-router.json"),
       JSON.stringify({
         minProbability: 0.7,
         maxAutoSkills: 2,
+        model: "jev-user-override",
         pinnedSkillPaths: ["../shared/SKILL.md"],
       }),
     );
@@ -164,6 +166,7 @@ test("configuration merges project scalars and unions relative pins; bad fields 
       join(root, ".pi/skill-router.json"),
       JSON.stringify({
         minProbability: 0.8,
+        model: "jev-project-override",
         pinnedSkillPaths: ["../shared/SKILL.md", "./skills/x/SKILL.md"],
       }),
     );
@@ -171,6 +174,7 @@ test("configuration merges project scalars and unions relative pins; bad fields 
     assert.deepEqual(loaded.issues, []);
     assert.equal(loaded.config.minProbability, 0.8);
     assert.equal(loaded.config.maxAutoSkills, 2);
+    assert.equal(loaded.config.model, "jev-project-override");
     assert.deepEqual(loaded.config.pinnedSkillPaths, [
       join(root, "shared/SKILL.md"),
       join(root, ".pi/skills/x/SKILL.md"),
@@ -187,6 +191,7 @@ test("configuration merges project scalars and unions relative pins; bad fields 
     const invalid = loadConfig(root, agent);
     assert.equal(invalid.issues.length, 4);
     assert.equal(invalid.config.pinnedSkillPaths.length, 2);
+    assert.equal(invalid.config.model, "jev-user-override");
     assert.doesNotMatch(invalid.issues.join(), /must-not-echo/);
     await writeFile(join(root, ".pi/skill-router.json"), "{not-json");
     assert.match(loadConfig(root, agent).issues.join(), /Invalid JSON/);
@@ -238,7 +243,7 @@ test("caller cancellation does not restore or restart the full catalog", async (
   assert.deepEqual(result.skills, []);
 });
 
-test("official SDK submits independent Noul questions with shared state and records actual model", async () => {
+test("routing pins the default model in the actual SDK payload and records the returned version", async () => {
   const candidates = autoCandidates([skill("a"), skill("b")], []);
   let body: Record<string, unknown> = {};
   let calls = 0;
@@ -259,15 +264,21 @@ test("official SDK submits independent Noul questions with shared state and reco
       });
     },
   });
-  const result = await evaluate({
-    candidates,
-    state,
-    signal: new AbortController().signal,
-    timeoutMs: 1000,
-  });
+  const result = await route(
+    {
+      catalog: candidates.map((candidate) => candidate.skill),
+      pinned: [],
+      state,
+      config,
+      signal: undefined,
+      issues: [],
+    },
+    evaluate,
+  );
   assert.equal(calls, 1);
-  assert.equal(result.model, "jev-concrete-version");
-  assert.equal(result.usage.input_tokens, 12);
+  assert.equal(body.model, "jev-1.14.0");
+  assert.equal(result.report.model, "jev-concrete-version");
+  assert.equal(result.report.usage?.input_tokens, 12);
   const questions = body.questions as Record<string, { type: string }>;
   assert.equal(Object.keys(questions).length, 2);
   assert(Object.values(questions).every((q) => q.type === "noul"));
