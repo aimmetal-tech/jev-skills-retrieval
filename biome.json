@@ -1,0 +1,7 @@
+{
+  "files": { "includes": ["**", "!outputs", "!dist", "!coverage", "!.tmp"] },
+  "formatter": { "indentStyle": "space", "indentWidth": 2 },
+  "javascript": { "formatter": { "quoteStyle": "double" } },
+  "linter": { "enabled": true },
+  "assist": { "actions": { "source": { "organizeImports": "on" } } }
+}
