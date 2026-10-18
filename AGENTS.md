@@ -8,6 +8,9 @@ Route each normal user request once. Reuse that choice during tool continuations
 Pinned paths and explicit `/skill:name` calls take precedence. Successful zero hits
 and routing failures are different. Do not claim support for mid-run steering,
 resumed pre-extension sessions, other harnesses, or removal of historical skills.
+The user superseded the original missing-key fallback: missing credentials now
+block the current Pi task until supplied. Cancel/no UI/dialog failure stops the
+task without sending a provider request; never silently fall back for missing keys.
 
 ## Structure and data flow
 
@@ -17,6 +20,9 @@ resumed pre-extension sessions, other harnesses, or removal of historical skills
 - `src/jev-client.ts`: official SDK batch Noul requests, strict response validation,
   sanitized failure codes, actual model version and token usage.
 - `src/context.ts`: raw current input, bounded visible conversation and prior metadata.
+- `src/credentials.ts`: environment-first credential resolution, blocking input,
+  private extension-memory fallback and cleanup on session shutdown.
+- `src/key-prompt.ts`: masked TUI credential input and native RPC input bridge.
 - `src/config.ts`: defaults and validated user/project configuration merge.
   Its explicit model default is shared by routing and evaluation.
 - `tests/*.test.ts`: core and real Pi provider-boundary integration tests.
@@ -37,7 +43,7 @@ resumed pre-extension sessions, other harnesses, or removal of historical skills
   ignored. Never stage dependencies, generated packages, credentials or artifacts.
 
 Data flow: `input` raw text -> `before_agent_start` complete catalog and two-level
-config -> fixed baseline -> bounded shared state and independent Jev Noul questions
+config -> fixed baseline -> blocking credential gate -> bounded shared state and independent Jev Noul questions
 -> deadline/response validation -> selected original Skill objects (or explicit
 fallback) -> `systemPromptOptions.skills` -> Pi native formatter -> provider.
 Only assistant text is retained in extension-owned recent history; tool results,
@@ -48,7 +54,13 @@ the latest report without raw task text or credentials.
 
 ## API conventions
 
-- Jev credentials come only from `TYPESAFE_API_KEY`, never configuration files.
+- Jev credentials prefer `TYPESAFE_API_KEY`; when missing in an interactive mode,
+  await key input and keep it only in extension memory. Never write keys to files,
+  process environment, conversation history, route state, reports or logs. TUI
+  input is masked; RPC rendering is controlled by the client. Empty input retries;
+  cancellation, missing UI and dialog errors block the task with `missing_key`.
+  Human input time is outside the routing network deadline. Clear temporary keys
+  on session shutdown. Non-interactive live evaluation still requires the env key.
 - Generic LLM integrations, if introduced later, prefer `LLM_API_KEY`,
   `LLM_BASE_URL`, and OpenAI Chat Completions. V1 needs no generic LLM call.
 - Use the official TypeSafe JavaScript SDK. Zero retries and one total deadline.

@@ -10,7 +10,7 @@ import {
 import { autoCandidates, selectAutomatic, uniqueSkills } from "./selection.ts";
 
 export interface RouteReport {
-  status: "selected" | "fallback" | "cancelled";
+  status: "selected" | "fallback" | "cancelled" | "blocked";
   reason?: FailureCode;
   message?: string;
   httpStatus?: number;

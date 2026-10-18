@@ -4,10 +4,12 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { zstdDecompressSync } from "node:zlib";
 import {
   createAgentSession,
   DefaultResourceLoader,
   type ExtensionFactory,
+  type ExtensionUIContext,
   ModelRuntime,
   SessionManager,
   SettingsManager,
@@ -23,8 +25,20 @@ import {
   type EvaluationResult,
   RoutingFailure,
 } from "../src/jev-client.ts";
-import { createSkillRouterExtension } from "../src/pi-adapter.ts";
+import { MaskedKeyInput } from "../src/key-prompt.ts";
+import {
+  type AdapterDependencies,
+  createSkillRouterExtension as createExtension,
+} from "../src/pi-adapter.ts";
 import type { RouteReport } from "../src/router.ts";
+
+// Existing boundary fixtures use an explicit fake credential; never inherit a real key.
+function createSkillRouterExtension(dependencies: AdapterDependencies) {
+  return createExtension({
+    getApiKey: () => "local-test-only",
+    ...dependencies,
+  });
+}
 
 function score(
   request: EvaluationRequest,
@@ -61,6 +75,7 @@ async function harness(
   factory: (root: string) => ExtensionFactory,
   toolFirst = false,
   after?: ExtensionFactory,
+  interaction?: { ui: Partial<ExtensionUIContext>; mode: "tui" | "rpc" },
 ) {
   const root = await mkdtemp(join(tmpdir(), "jev-pi-test-"));
   const payloads: Payload[] = [];
@@ -162,6 +177,16 @@ async function harness(
   assert.deepEqual(extensionsResult.errors, []);
   await session.bindExtensions({
     onError: (error) => errors.push(error),
+    ...(interaction
+      ? {
+          mode: interaction.mode,
+          uiContext: {
+            notify() {},
+            setStatus() {},
+            ...interaction.ui,
+          } as ExtensionUIContext,
+        }
+      : {}),
   });
   session.subscribe((event) => {
     if (
@@ -532,6 +557,321 @@ test("reloading an existing conversation clearly skips unsupported history takeo
     assert.match(diagnostics.join("\n"), /requires a fresh session/);
     assert.match(payloadText(h.payloads[1]), /UNIQUE_METADATA_BETA/);
     assert.deepEqual(h.errors, []);
+  } finally {
+    await h.close();
+  }
+});
+
+type CustomFactory = Parameters<ExtensionUIContext["custom"]>[0];
+type CustomArguments = Parameters<CustomFactory>;
+
+function terminalInput(
+  onOpen: (input: MaskedKeyInput) => void | Promise<void>,
+): Partial<ExtensionUIContext> {
+  return {
+    custom: async <T>(factory: CustomFactory): Promise<T> => {
+      let done: (value: unknown) => void = () => {};
+      const result = new Promise<unknown>((resolve) => {
+        done = resolve;
+      });
+      const component = await factory(
+        { requestRender() {} } as CustomArguments[0],
+        {} as CustomArguments[1],
+        {} as CustomArguments[2],
+        done,
+      );
+      assert(component instanceof MaskedKeyInput);
+      try {
+        await onOpen(component);
+        return (await result) as T;
+      } finally {
+        component.dispose();
+      }
+    },
+  };
+}
+
+function sdkTransport() {
+  const requests: Array<{
+    authorization: string | null;
+    body: Record<string, unknown>;
+  }> = [];
+  const fetch: NonNullable<AdapterDependencies["fetch"]> = async (
+    _url,
+    init,
+  ) => {
+    let bytes = Buffer.from(await new Response(init?.body).arrayBuffer());
+    if (new Headers(init?.headers).get("content-encoding") === "zstd")
+      bytes = zstdDecompressSync(bytes);
+    const body = JSON.parse(bytes.toString()) as Record<string, unknown>;
+    requests.push({
+      authorization: new Headers(init?.headers).get("authorization"),
+      body,
+    });
+    return Response.json({
+      model: "jev-1.14.0",
+      answers: Object.fromEntries(
+        Object.keys(body.questions as object).map((id) => [
+          id,
+          { type: "noul", noul: 0.9 },
+        ]),
+      ),
+      usage: { input_tokens: 10, output_tokens: 2 },
+    });
+  };
+  return { requests, fetch };
+}
+
+function assertOnlyPiAbort(errors: readonly unknown[]) {
+  assert(
+    errors.every(
+      (error) => typeof error === "string" && /aborted/i.test(error),
+    ),
+    JSON.stringify(errors),
+  );
+}
+
+test("TUI key dialog blocks provider work, resumes the same task and keeps the key out of transcripts", async () => {
+  const transport = sdkTransport();
+  const key = "test-tui-session-credential";
+  const environmentBefore = process.env.TYPESAFE_API_KEY;
+  let opened: () => void = () => {};
+  const ready = new Promise<void>((resolve) => {
+    opened = resolve;
+  });
+  let release: () => void = () => {};
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let prompts = 0;
+  const ui = terminalInput(async (input) => {
+    prompts++;
+    input.handleInput(`\x1b[200~${key}\x1b[201~`);
+    assert.doesNotMatch(
+      input.render(80).join("\n"),
+      /test-tui-session-credential/,
+    );
+    opened();
+    await released;
+    input.handleInput("\r");
+  });
+  const h = await harness(
+    (root) =>
+      createSkillRouterExtension({
+        getApiKey: () => undefined,
+        fetch: transport.fetch,
+        configuration: () => configuration(root, { routeTimeoutMs: 100 }),
+      }),
+    false,
+    undefined,
+    { ui, mode: "tui" },
+  );
+  try {
+    const pending = h.session.prompt("Original waiting task");
+    await ready;
+    // Waiting for the user must not consume the remote routing deadline.
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    assert.equal(transport.requests.length, 0);
+    assert.equal(h.payloads.length, 0);
+    release();
+    await pending;
+    assert.equal(transport.requests.length, 1);
+    assert.equal(h.payloads.length, 1);
+    assert.equal(transport.requests[0]?.authorization, `Bearer ${key}`);
+    assert.equal(
+      JSON.parse(transport.requests[0]?.body.state as string).currentMessage,
+      "Original waiting task",
+    );
+    await h.session.prompt("Follow-up using the stored credential");
+    assert.equal(prompts, 1);
+    assert.equal(transport.requests.length, 2);
+    assert(
+      transport.requests.every(
+        (request) => request.authorization === `Bearer ${key}`,
+      ),
+    );
+    assert.doesNotMatch(
+      JSON.stringify(h.payloads),
+      /test-tui-session-credential/,
+    );
+    assert.doesNotMatch(
+      JSON.stringify(h.session.sessionManager.getBranch()),
+      /test-tui-session-credential/,
+    );
+    assert.doesNotMatch(
+      JSON.stringify(transport.requests.map((request) => request.body)),
+      /test-tui-session-credential/,
+    );
+    assert.equal(process.env.TYPESAFE_API_KEY, environmentBefore);
+    assert.deepEqual(h.errors, []);
+  } finally {
+    release();
+    await h.close();
+  }
+});
+
+test("RPC empty key input stays blocked until a nonempty value is supplied", async () => {
+  const transport = sdkTransport();
+  let prompts = 0;
+  const h = await harness(
+    (root) =>
+      createSkillRouterExtension({
+        getApiKey: () => undefined,
+        fetch: transport.fetch,
+        configuration: () => configuration(root),
+      }),
+    false,
+    undefined,
+    {
+      mode: "rpc",
+      ui: {
+        input: async () => {
+          assert.equal(transport.requests.length, 0);
+          prompts++;
+          return prompts === 1 ? "   " : "test-rpc-key";
+        },
+      },
+    },
+  );
+  try {
+    await h.session.prompt("RPC task");
+    assert.equal(prompts, 2);
+    assert.equal(transport.requests.length, 1);
+    assert.equal(transport.requests[0]?.authorization, "Bearer test-rpc-key");
+    assert.equal(h.payloads.length, 1);
+    assert.deepEqual(h.errors, []);
+  } finally {
+    await h.close();
+  }
+});
+
+test("cancelling the key dialog cancels this task instead of falling back; the next task can retry", async () => {
+  const transport = sdkTransport();
+  const reports: RouteReport[] = [];
+  let prompts = 0;
+  const ui = terminalInput((input) => {
+    if (++prompts === 1) input.handleInput("\x1b");
+    else {
+      input.handleInput("test-retry-key");
+      input.handleInput("\r");
+    }
+  });
+  const h = await harness(
+    (root) =>
+      createSkillRouterExtension({
+        getApiKey: () => undefined,
+        fetch: transport.fetch,
+        configuration: () => configuration(root),
+        onReport: (report) => reports.push(report),
+      }),
+    false,
+    undefined,
+    { ui, mode: "tui" },
+  );
+  try {
+    await h.session.prompt("Cancelled before credentials");
+    assert.equal(transport.requests.length, 0);
+    assert.equal(h.payloads.length, 0);
+    assert.equal(reports[0]?.status, "blocked");
+    assert.equal(reports[0]?.reason, "missing_key");
+    assertOnlyPiAbort(h.errors);
+    h.errors.length = 0;
+    await h.session.prompt("Retry with credentials");
+    assert.equal(prompts, 2);
+    assert.equal(transport.requests.length, 1);
+    assert.equal(h.payloads.length, 1);
+    assert.equal(reports[1]?.status, "selected");
+    assert.deepEqual(h.errors, []);
+  } finally {
+    await h.close();
+  }
+});
+
+test("missing key without UI blocks the task and never sends a provider request", async () => {
+  const transport = sdkTransport();
+  const reports: RouteReport[] = [];
+  const diagnostics: string[] = [];
+  const h = await harness((root) =>
+    createSkillRouterExtension({
+      getApiKey: () => undefined,
+      fetch: transport.fetch,
+      configuration: () => configuration(root),
+      onReport: (report) => reports.push(report),
+      onDiagnostic: (message) => diagnostics.push(message),
+    }),
+  );
+  try {
+    await h.session.prompt("Headless task");
+    assert.equal(transport.requests.length, 0);
+    assert.equal(h.payloads.length, 0);
+    assert.equal(reports[0]?.status, "blocked");
+    assert.match(diagnostics.join("\n"), /无法弹出输入框/);
+    assertOnlyPiAbort(h.errors);
+  } finally {
+    await h.close();
+  }
+});
+
+test("key dialog failure blocks execution without exposing its error text", async () => {
+  const transport = sdkTransport();
+  const diagnostics: string[] = [];
+  const h = await harness(
+    (root) =>
+      createSkillRouterExtension({
+        getApiKey: () => undefined,
+        fetch: transport.fetch,
+        configuration: () => configuration(root),
+        onDiagnostic: (message) => diagnostics.push(message),
+      }),
+    false,
+    undefined,
+    {
+      mode: "rpc",
+      ui: {
+        input: async () => {
+          throw new Error("sensitive-dialog-key");
+        },
+      },
+    },
+  );
+  try {
+    await h.session.prompt("Task with failed dialog");
+    assert.equal(transport.requests.length, 0);
+    assert.equal(h.payloads.length, 0);
+    assert.match(diagnostics.join("\n"), /无法打开/);
+    assert.doesNotMatch(
+      JSON.stringify({
+        diagnostics,
+        entries: h.session.sessionManager.getBranch(),
+        errors: h.errors,
+      }),
+      /sensitive-dialog-key/,
+    );
+    assertOnlyPiAbort(h.errors);
+  } finally {
+    await h.close();
+  }
+});
+
+test("a credential disappearing after the preflight still blocks instead of falling back", async () => {
+  const transport = sdkTransport();
+  let reads = 0;
+  const reports: RouteReport[] = [];
+  const h = await harness((root) =>
+    createSkillRouterExtension({
+      getApiKey: () => (++reads === 1 ? "test-ephemeral-key" : undefined),
+      fetch: transport.fetch,
+      configuration: () => configuration(root),
+      onReport: (report) => reports.push(report),
+    }),
+  );
+  try {
+    await h.session.prompt("Task with removed environment credential");
+    assert.equal(transport.requests.length, 0);
+    assert.equal(h.payloads.length, 0);
+    assert.equal(reports[0]?.status, "blocked");
+    assert.equal(reports[0]?.reason, "missing_key");
+    assertOnlyPiAbort(h.errors);
   } finally {
     await h.close();
   }

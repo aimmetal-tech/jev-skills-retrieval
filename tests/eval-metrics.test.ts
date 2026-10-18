@@ -70,5 +70,10 @@ test("evaluation zero-hit accuracy includes failures and empty measurements stay
     0,
   );
   assert.equal(percentile([], 0.95), null);
+  const blocked = summarize([
+    { ...row, report: { ...row.report, status: "blocked" } },
+  ]);
+  assert.equal(blocked.blocked, 1);
+  assert.equal(blocked.zeroHitAccuracy, 0);
   assert.equal(summarize([]).requiredSkillRecall, null);
 });

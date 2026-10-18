@@ -59,6 +59,7 @@ export function summarize(
     successful: successful.length,
     fallbacks: rows.filter((row) => row.report.status === "fallback").length,
     cancelled: rows.filter((row) => row.report.status === "cancelled").length,
+    blocked: rows.filter((row) => row.report.status === "blocked").length,
     requiredSkillRecall: required ? recalled / required : null,
     requiredSkills: required,
     recalledSkills: recalled,

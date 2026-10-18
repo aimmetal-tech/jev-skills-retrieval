@@ -1,17 +1,22 @@
 import {
+  type ExtensionContext,
   type ExtensionFactory,
   formatSkillsForPrompt,
   getAgentDir,
   type Skill,
 } from "@earendil-works/pi-coding-agent";
+import type { Fetch } from "@typesafe-ai/sdk";
 import { type LoadedConfig, loadConfig } from "./config.ts";
 import { buildRoutingState, type ConversationTurn } from "./context.ts";
+import { JevCredentials } from "./credentials.ts";
 import { createJevEvaluator, type Evaluator } from "./jev-client.ts";
 import { type RouteReport, route } from "./router.ts";
-import { pinnedSkills, uniqueSkills } from "./selection.ts";
+import { autoCandidates, pinnedSkills, uniqueSkills } from "./selection.ts";
 
 export interface AdapterDependencies {
   evaluate?: Evaluator;
+  fetch?: Fetch;
+  getApiKey?: () => string | undefined;
   configuration?: (cwd: string) => LoadedConfig;
   onReport?: (report: RouteReport) => void;
   onDiagnostic?: (message: string) => void;
@@ -21,7 +26,13 @@ export function createSkillRouterExtension(
   dependencies: AdapterDependencies = {},
 ): ExtensionFactory {
   return (pi) => {
-    const evaluate = dependencies.evaluate ?? createJevEvaluator();
+    const credentials = new JevCredentials(dependencies.getApiKey);
+    const evaluate =
+      dependencies.evaluate ??
+      createJevEvaluator({
+        getApiKey: credentials.getApiKey,
+        ...(dependencies.fetch ? { fetch: dependencies.fetch } : {}),
+      });
     let rawText: string | undefined;
     let history: ConversationTurn[] = [];
     let previous: Skill[] = [];
@@ -32,6 +43,17 @@ export function createSkillRouterExtension(
     let conflictReported = false;
     let unsupportedSession = false;
     let lastReport: RouteReport | undefined;
+    const blockForMissingKey = (ctx: ExtensionContext, report: RouteReport) => {
+      lastReport = { ...report, status: "blocked", reason: "missing_key" };
+      dependencies.onReport?.(lastReport);
+      pi.appendEntry("jev-skill-router", lastReport);
+      ctx.ui.setStatus("jev-skill-router", "Skills: blocked · missing_key");
+      const message =
+        lastReport.message ?? "Jev 缺少 API key；本次任务已停止。";
+      dependencies.onDiagnostic?.(message);
+      ctx.ui.notify(message, "error");
+      ctx.abort();
+    };
     pi.on("session_start", (_event, ctx) => {
       rawText = undefined;
       history = [];
@@ -56,6 +78,7 @@ export function createSkillRouterExtension(
         ctx.ui.notify(message, "warning");
       } else rawText = event.text;
     });
+    pi.on("session_shutdown", () => credentials.clear());
     pi.on("before_agent_start", async (event, ctx) => {
       if (event.messageType !== "user") return;
       const inputText = rawText;
@@ -88,6 +111,34 @@ export function createSkillRouterExtension(
               : undefined;
       // Fixed baseline is written before remote work. Errors explicitly restore the catalog.
       event.systemPromptOptions.skills = pinned.skills;
+      const candidateCount = autoCandidates(catalog, pinned.skills).length;
+      if (
+        !issues.length &&
+        candidateCount > 0 &&
+        loaded.config.maxAutoSkills > 0 &&
+        loaded.config.autoMetadataMaxChars > 0
+      ) {
+        // Human input is awaited before the network deadline begins. Missing credentials
+        // must never fall through to an un-routed model request.
+        const credential = await credentials.ensure(ctx);
+        if (credential.status !== "ready") {
+          const message =
+            credential.status === "unavailable"
+              ? "Jev 缺少 TYPESAFE_API_KEY，当前模式无法弹出输入框。请设置环境变量后重新启动；本次任务已停止。"
+              : credential.status === "ui_error"
+                ? "无法打开 Jev API key 输入框；本次任务已停止。"
+                : "未提供 Jev API key；本次任务已取消，未发送模型请求。";
+          blockForMissingKey(ctx, {
+            status: "blocked",
+            reason: "missing_key",
+            message,
+            elapsedMs: 0,
+            candidateCount,
+            selectedCount: pinned.skills.length,
+          });
+          return;
+        }
+      }
       const result = await route(
         {
           catalog,
@@ -107,6 +158,14 @@ export function createSkillRouterExtension(
         evaluate,
       );
       if (ctx.signal?.aborted || result.report.status === "cancelled") return;
+      if (result.report.reason === "missing_key") {
+        blockForMissingKey(ctx, {
+          ...result.report,
+          selectedCount: pinned.skills.length,
+          message: "Jev API key 已不可用；本次任务已停止，未发送模型请求。",
+        });
+        return;
+      }
       event.systemPromptOptions.skills = result.skills;
       previous = result.skills;
       current = { user: inputText, assistant: "" };
