@@ -13,6 +13,11 @@ resumed pre-extension sessions, other harnesses, or removal of historical skills
 
 - `src/pi-adapter.ts`: Pi lifecycle entry point and per-run structured skill catalog.
 - `src/selection.ts`: canonical local path identity, deduplication and pinned clones.
+- `src/router.ts`: one total routing deadline, cancellation and explicit fallback.
+- `src/jev-client.ts`: official SDK batch Noul requests, strict response validation,
+  sanitized failure codes, actual model version and token usage.
+- `src/context.ts`: raw current input, bounded visible conversation and prior metadata.
+- `src/config.ts`: defaults and validated user/project configuration merge.
 - `tests/*.test.ts`: core and real Pi provider-boundary integration tests.
 - `package.json`: Pi package entry, dependencies, build and verification scripts.
 - `tsconfig*.json`, `biome.json`: strict TypeScript build and lint configuration.
@@ -21,8 +26,15 @@ resumed pre-extension sessions, other harnesses, or removal of historical skills
 - `dist/`: generated package output; ignored. `.tmp/`, `outputs/`: local evidence;
   ignored. Never stage dependencies, generated packages, credentials or artifacts.
 
-Data flow: `input` raw text -> `before_agent_start` complete catalog -> selected
-original Skill objects -> `systemPromptOptions.skills` -> Pi native formatter.
+Data flow: `input` raw text -> `before_agent_start` complete catalog and two-level
+config -> fixed baseline -> bounded shared state and independent Jev Noul questions
+-> deadline/response validation -> selected original Skill objects (or explicit
+fallback) -> `systemPromptOptions.skills` -> Pi native formatter -> provider.
+Only assistant text is retained in extension-owned recent history; tool results,
+thinking, skill bodies and session custom entries are excluded. Session reload
+with existing messages is explicitly unsupported and skips routing. Diagnostics
+persist as `jev-skill-router` custom entries and `/skill-router-status` displays
+the latest report without raw task text or credentials.
 
 ## API conventions
 

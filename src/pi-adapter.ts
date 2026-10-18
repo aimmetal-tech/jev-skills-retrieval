@@ -1,69 +1,168 @@
-import type {
-  ExtensionAPI,
-  ExtensionFactory,
-  Skill,
+import {
+  type ExtensionFactory,
+  formatSkillsForPrompt,
+  getAgentDir,
+  type Skill,
 } from "@earendil-works/pi-coding-agent";
+import { type LoadedConfig, loadConfig } from "./config.ts";
+import { buildRoutingState, type ConversationTurn } from "./context.ts";
+import { createJevEvaluator, type Evaluator } from "./jev-client.ts";
+import { type RouteReport, route } from "./router.ts";
 import { pinnedSkills, uniqueSkills } from "./selection.ts";
 
-export interface RoundInput {
-  rawText: string;
-  catalog: readonly Skill[];
-  signal: AbortSignal | undefined;
-}
-
 export interface AdapterDependencies {
-  select(input: RoundInput): Promise<readonly Skill[]>;
-  pinnedPaths?: readonly string[];
+  evaluate?: Evaluator;
+  configuration?: (cwd: string) => LoadedConfig;
+  onReport?: (report: RouteReport) => void;
+  onDiagnostic?: (message: string) => void;
 }
 
-/** Injectable selection keeps the native Pi boundary independently verifiable. */
 export function createSkillRouterExtension(
-  dependencies: AdapterDependencies,
+  dependencies: AdapterDependencies = {},
 ): ExtensionFactory {
-  return (pi: ExtensionAPI) => {
+  return (pi) => {
+    const evaluate = dependencies.evaluate ?? createJevEvaluator();
     let rawText: string | undefined;
-    pi.on("session_start", () => {
+    let history: ConversationTurn[] = [];
+    let previous: Skill[] = [];
+    let current: ConversationTurn | undefined;
+    let historyLimit = 3;
+    let earlierHistoryOmitted = false;
+    let expectedMetadata: string | undefined;
+    let conflictReported = false;
+    let unsupportedSession = false;
+    let lastReport: RouteReport | undefined;
+    pi.on("session_start", (_event, ctx) => {
       rawText = undefined;
+      history = [];
+      earlierHistoryOmitted = false;
+      previous = [];
+      current = undefined;
+      expectedMetadata = undefined;
+      lastReport = undefined;
+      unsupportedSession = ctx.sessionManager
+        .getBranch()
+        .some(
+          (entry) =>
+            entry.type === "message" &&
+            ["user", "assistant"].includes(entry.message.role),
+        );
     });
-    pi.on("input", (event) => {
-      if (!event.streamingBehavior) rawText = event.text;
+    pi.on("input", (event, ctx) => {
+      if (event.streamingBehavior) {
+        const message =
+          "Skill router v1 does not reroute mid-run steering or queued input.";
+        dependencies.onDiagnostic?.(message);
+        ctx.ui.notify(message, "warning");
+      } else rawText = event.text;
     });
     pi.on("before_agent_start", async (event, ctx) => {
       if (event.messageType !== "user") return;
-      const inputText = rawText ?? event.prompt;
+      const inputText = rawText;
       rawText = undefined;
-      const catalog = [...event.systemPromptOptions.skills];
-      const pinned = pinnedSkills(catalog, dependencies.pinnedPaths ?? []);
-      for (const issue of pinned.issues) ctx.ui.notify(issue, "warning");
-      // Establish the baseline before any awaited or potentially failing work.
-      event.systemPromptOptions.skills = pinned.skills;
-      try {
-        const selected = await dependencies.select({
-          rawText: inputText,
-          catalog,
-          signal: ctx.signal,
-        });
-        if (ctx.signal?.aborted) return;
-        event.systemPromptOptions.skills = uniqueSkills([
-          ...pinned.skills,
-          ...selected,
-        ]);
-      } catch {
-        if (ctx.signal?.aborted) return;
-        event.systemPromptOptions.skills = uniqueSkills([
-          ...pinned.skills,
-          ...catalog,
-        ]);
-        ctx.ui.notify(
-          "Skill routing failed; using the original catalog.",
-          "warning",
-        );
+      expectedMetadata = undefined;
+      conflictReported = false;
+      if (unsupportedSession || inputText === undefined) {
+        const message =
+          "Skill router v1 requires a fresh session and normal raw user input; using the original catalog.";
+        dependencies.onDiagnostic?.(message);
+        ctx.ui.notify(message, "warning");
+        return;
       }
+      const catalog = uniqueSkills(event.systemPromptOptions.skills);
+      const loaded =
+        dependencies.configuration?.(ctx.cwd) ??
+        loadConfig(ctx.cwd, getAgentDir());
+      historyLimit = loaded.config.historyMaxTurns;
+      const pinned = pinnedSkills(catalog, loaded.config.pinnedSkillPaths);
+      const issues = [...loaded.issues, ...pinned.issues];
+      // Fixed baseline is written before remote work. Errors explicitly restore the catalog.
+      event.systemPromptOptions.skills = pinned.skills;
+      const result = await route(
+        {
+          catalog,
+          pinned: pinned.skills,
+          state: buildRoutingState(
+            inputText,
+            history,
+            previous,
+            loaded.config,
+            earlierHistoryOmitted,
+          ),
+          config: loaded.config,
+          signal: ctx.signal,
+          issues,
+        },
+        evaluate,
+      );
+      if (ctx.signal?.aborted || result.report.status === "cancelled") return;
+      event.systemPromptOptions.skills = result.skills;
+      previous = result.skills;
+      current = { user: inputText, assistant: "" };
+      const tools = event.systemPromptOptions.selectedTools;
+      const reader = tools.includes("read")
+        ? "read"
+        : tools.includes("bash")
+          ? "bash"
+          : undefined;
+      expectedMetadata = reader
+        ? formatSkillsForPrompt(result.skills, reader).trim()
+        : undefined;
+      lastReport = result.report;
+      dependencies.onReport?.(lastReport);
+      pi.appendEntry("jev-skill-router", lastReport);
+      ctx.ui.setStatus(
+        "jev-skill-router",
+        `Skills: ${result.skills.length} · ${lastReport.status}${lastReport.model ? ` · ${lastReport.model}` : ""}`,
+      );
+      if (lastReport.status === "fallback") {
+        const message = `Skill router fallback [${lastReport.reason}]: ${lastReport.message} Using the original catalog and valid pinned skills.`;
+        dependencies.onDiagnostic?.(message);
+        ctx.ui.notify(message, "warning");
+      }
+    });
+    pi.on("before_provider_request", (_event, ctx) => {
+      if (expectedMetadata === undefined || conflictReported) return;
+      const prompt = ctx.getSystemPrompt();
+      if (
+        expectedMetadata
+          ? !prompt.includes(expectedMetadata)
+          : prompt.includes("<available_skills>")
+      ) {
+        conflictReported = true;
+        const message =
+          "Skill router conflict: another extension or forced systemPrompt changed the routed skill metadata. Check extension order and prompt overrides.";
+        dependencies.onDiagnostic?.(message);
+        ctx.ui.notify(message, "warning");
+      }
+    });
+    pi.on("message_end", (event) => {
+      if (!current || event.message.role !== "assistant") return;
+      const text = event.message.content
+        .filter((part) => part.type === "text")
+        .map((part) => part.text)
+        .join("\n");
+      if (text) current.assistant += `${current.assistant ? "\n" : ""}${text}`;
+    });
+    pi.on("agent_end", () => {
+      if (current) history.push(current);
+      if (history.length > historyLimit) earlierHistoryOmitted = true;
+      history = historyLimit === 0 ? [] : history.slice(-historyLimit);
+      current = undefined;
+    });
+    pi.registerCommand("skill-router-status", {
+      description:
+        "Show the latest Jev skill-routing diagnostic (no prompt or key)",
+      handler: async (_args, ctx) => {
+        ctx.ui.notify(
+          lastReport
+            ? JSON.stringify(lastReport, null, 2)
+            : "No routing result in this session.",
+          "info",
+        );
+      },
     });
   };
 }
 
-/** Stage-one boundary prototype. Live Jev selection is introduced separately. */
-export default createSkillRouterExtension({
-  select: async ({ catalog }) => catalog,
-});
+export default createSkillRouterExtension();

@@ -12,7 +12,46 @@ import {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import {
+  DEFAULT_CONFIG,
+  loadConfig,
+  type RouterConfig,
+} from "../src/config.ts";
+import {
+  createJevEvaluator,
+  type EvaluationRequest,
+  type EvaluationResult,
+  RoutingFailure,
+} from "../src/jev-client.ts";
 import { createSkillRouterExtension } from "../src/pi-adapter.ts";
+import type { RouteReport } from "../src/router.ts";
+
+function score(
+  request: EvaluationRequest,
+  names: readonly string[],
+): EvaluationResult {
+  return {
+    probabilities: Object.fromEntries(
+      request.candidates.map((candidate) => [
+        candidate.id,
+        names.includes(candidate.name) ? 0.9 : 0.1,
+      ]),
+    ),
+    model: "jev-test-version",
+    usage: { input_tokens: 10, output_tokens: 2 },
+  };
+}
+
+function configuration(root: string, overrides: Partial<RouterConfig> = {}) {
+  return {
+    config: {
+      ...DEFAULT_CONFIG,
+      pinnedSkillPaths: [join(root, ".pi/skills/pinned/SKILL.md")],
+      ...overrides,
+    },
+    issues: [],
+  };
+}
 
 interface Payload {
   messages: Array<{ role: string; content: unknown }>;
@@ -21,6 +60,7 @@ interface Payload {
 async function harness(
   factory: (root: string) => ExtensionFactory,
   toolFirst = false,
+  after?: ExtensionFactory,
 ) {
   const root = await mkdtemp(join(tmpdir(), "jev-pi-test-"));
   const payloads: Payload[] = [];
@@ -105,7 +145,7 @@ async function harness(
     noContextFiles: true,
     noPromptTemplates: true,
     noThemes: true,
-    extensionFactories: [factory(root)],
+    extensionFactories: [factory(root), ...(after ? [after] : [])],
   });
   await loader.reload();
   const { session, extensionsResult } = await createAgentSession({
@@ -158,10 +198,10 @@ test("actual provider payload contains selected and pinned metadata; tool contin
   const h = await harness(
     (root) =>
       createSkillRouterExtension({
-        pinnedPaths: [join(root, ".pi", "skills", "pinned", "SKILL.md")],
-        select: async ({ catalog }) => {
+        configuration: () => configuration(root),
+        evaluate: async (request) => {
           routes++;
-          return catalog.filter((s) => s.name === "alpha");
+          return score(request, ["alpha"]);
         },
       }),
     true,
@@ -192,9 +232,13 @@ test("explicit command body is loaded natively and raw input reaches the selecto
   let raw = "";
   const h = await harness(() =>
     createSkillRouterExtension({
-      select: async (input) => {
-        raw = input.rawText;
-        return [];
+      configuration: () => ({
+        config: { ...DEFAULT_CONFIG, pinnedSkillPaths: [] },
+        issues: [],
+      }),
+      evaluate: async (input) => {
+        raw = input.state.currentMessage;
+        return score(input, []);
       },
     }),
   );
@@ -209,6 +253,284 @@ test("explicit command body is loaded natively and raw input reaches the selecto
       await readFile(join(h.root, ".pi/skills/pinned/SKILL.md"), "utf8"),
       /disable-model-invocation: true/,
     );
+    assert.deepEqual(h.errors, []);
+  } finally {
+    await h.close();
+  }
+});
+
+test("next user request replaces A with B and receives only raw chat and previous metadata", async () => {
+  const requests: EvaluationRequest[] = [];
+  const reports: RouteReport[] = [];
+  const h = await harness(
+    (root) =>
+      createSkillRouterExtension({
+        configuration: () => configuration(root),
+        evaluate: async (request) => {
+          requests.push(request);
+          return score(request, [requests.length === 1 ? "alpha" : "beta"]);
+        },
+        onReport: (report) => reports.push(report),
+      }),
+    true,
+  );
+  try {
+    await h.session.prompt("First task");
+    await h.session.prompt("Next task");
+    assert.equal(requests.length, 2);
+    const state = requests[1]?.state;
+    assert.equal(state?.currentMessage, "Next task");
+    assert.deepEqual(state?.recentConversation.turns, [
+      { user: "First task", assistant: "Complete." },
+    ]);
+    assert.deepEqual(state?.previousSkills.map((s) => s.name).sort(), [
+      "alpha",
+      "pinned",
+    ]);
+    assert.doesNotMatch(
+      JSON.stringify(state),
+      /UNIQUE_BODY|SKILL\.md|toolResult/,
+    );
+    const text = payloadText(h.payloads[2]);
+    const catalogs = [
+      ...text.matchAll(/<available_skills>([\s\S]*?)<\/available_skills>/g),
+    ];
+    const lastCatalog = catalogs.at(-1)?.[1];
+    assert(lastCatalog, text);
+    assert.match(lastCatalog, /UNIQUE_METADATA_BETA/);
+    assert.match(lastCatalog, /UNIQUE_METADATA_PINNED/);
+    assert.doesNotMatch(lastCatalog, /UNIQUE_METADATA_ALPHA/);
+    assert.equal(reports[1]?.model, "jev-test-version");
+    assert.deepEqual(h.errors, []);
+  } finally {
+    await h.close();
+  }
+});
+
+test("normal zero hits yields pinned-only metadata; a service failure restores the full catalog", async () => {
+  for (const failure of [false, true]) {
+    let last: RouteReport | undefined;
+    const diagnostics: string[] = [];
+    const h = await harness((root) =>
+      createSkillRouterExtension({
+        configuration: () => configuration(root),
+        evaluate: async (request) => {
+          if (failure)
+            throw new RoutingFailure(
+              "authentication",
+              "Jev authentication failed (HTTP 401).",
+            );
+          return score(request, []);
+        },
+        onReport: (report) => {
+          last = report;
+        },
+        onDiagnostic: (message) => diagnostics.push(message),
+      }),
+    );
+    try {
+      await h.session.prompt("Task");
+      const text = payloadText(h.payloads[0]);
+      assert.match(text, /UNIQUE_METADATA_PINNED/);
+      if (failure) {
+        assert.match(text, /UNIQUE_METADATA_ALPHA/);
+        assert.match(text, /UNIQUE_METADATA_BETA/);
+        assert.equal(last?.status, "fallback");
+        assert.match(diagnostics.join("\n"), /authentication/);
+      } else {
+        assert.doesNotMatch(text, /UNIQUE_METADATA_ALPHA|UNIQUE_METADATA_BETA/);
+        assert.equal(last?.status, "selected");
+        assert.deepEqual(diagnostics, []);
+      }
+      assert.deepEqual(h.errors, []);
+    } finally {
+      await h.close();
+    }
+  }
+});
+
+test("invalid pinned path is diagnosed and valid pins survive config failure without an API request", async () => {
+  let calls = 0;
+  const diagnostics: string[] = [];
+  const h = await harness((root) =>
+    createSkillRouterExtension({
+      configuration: () =>
+        configuration(root, {
+          pinnedSkillPaths: [
+            join(root, ".pi/skills/pinned/SKILL.md"),
+            join(root, "missing/SKILL.md"),
+          ],
+        }),
+      evaluate: async (request) => {
+        calls++;
+        return score(request, []);
+      },
+      onDiagnostic: (message) => diagnostics.push(message),
+    }),
+  );
+  try {
+    await h.session.prompt("Task");
+    assert.equal(calls, 0);
+    assert.match(payloadText(h.payloads[0]), /UNIQUE_METADATA_PINNED/);
+    assert.match(diagnostics.join("\n"), /missing.*SKILL\.md/);
+    assert.deepEqual(h.errors, []);
+  } finally {
+    await h.close();
+  }
+});
+
+test("later forced prompt override emits a conflict diagnostic", async () => {
+  const diagnostics: string[] = [];
+  const h = await harness(
+    (root) =>
+      createSkillRouterExtension({
+        configuration: () => configuration(root),
+        evaluate: async (request) => score(request, ["alpha"]),
+        onDiagnostic: (message) => diagnostics.push(message),
+      }),
+    false,
+    (pi) => {
+      pi.on("before_agent_start", () => ({
+        systemPrompt: "Forced by another extension",
+      }));
+    },
+  );
+  try {
+    await h.session.prompt("Task");
+    assert.match(payloadText(h.payloads[0]), /Forced by another extension/);
+    assert.match(diagnostics.join("\n"), /conflict.*forced systemPrompt/);
+    assert.deepEqual(h.errors, []);
+  } finally {
+    await h.close();
+  }
+});
+
+test("cancellation while waiting for routing never restarts the Pi provider", async () => {
+  let started: (() => void) | undefined;
+  const ready = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  const h = await harness((root) =>
+    createSkillRouterExtension({
+      configuration: () => configuration(root, { routeTimeoutMs: 40 }),
+      evaluate: async () => {
+        started?.();
+        return new Promise(() => {});
+      },
+    }),
+  );
+  try {
+    const prompt = h.session.prompt("Task to cancel");
+    await ready;
+    const cancelled = h.session.abort();
+    await Promise.all([prompt, cancelled]);
+    assert.equal(h.payloads.length, 0);
+    assert(
+      h.errors.every(
+        (error) => typeof error === "string" && /aborted/i.test(error),
+      ),
+      JSON.stringify(h.errors),
+    );
+  } finally {
+    await h.close();
+  }
+});
+
+test("official Jev SDK and real Pi provider compose with project configuration", async () => {
+  let sdkCalls = 0;
+  const evaluate = createJevEvaluator({
+    getApiKey: () => "local-test-only",
+    fetch: async () => {
+      sdkCalls++;
+      // Build a response from the actual per-catalog candidate IDs captured below.
+      return Response.json(sdkResponse);
+    },
+  });
+  let sdkResponse: unknown;
+  const h = await harness((root) =>
+    createSkillRouterExtension({
+      configuration: () => loadConfig(root, join(root, "agent")),
+      evaluate: async (request) => {
+        sdkResponse = {
+          model: "jev-sdk-test",
+          answers: Object.fromEntries(
+            request.candidates.map((c) => [
+              c.id,
+              { type: "noul", noul: c.name === "beta" ? 0.9 : 0.1 },
+            ]),
+          ),
+          usage: { input_tokens: 25, output_tokens: 2 },
+        };
+        return evaluate(request);
+      },
+    }),
+  );
+  try {
+    await writeFile(
+      join(h.root, ".pi/skill-router.json"),
+      JSON.stringify({ pinnedSkillPaths: ["./skills/pinned/SKILL.md"] }),
+    );
+    await h.session.prompt("Task");
+    assert.equal(sdkCalls, 1);
+    const text = payloadText(h.payloads[0]);
+    assert.match(text, /UNIQUE_METADATA_BETA/);
+    assert.match(text, /UNIQUE_METADATA_PINNED/);
+    assert.doesNotMatch(text, /UNIQUE_METADATA_ALPHA/);
+    assert.deepEqual(h.errors, []);
+  } finally {
+    await h.close();
+  }
+});
+
+test("a later successful zero hit removes the active automatic section", async () => {
+  let calls = 0;
+  const h = await harness(() =>
+    createSkillRouterExtension({
+      configuration: () => ({
+        config: { ...DEFAULT_CONFIG, pinnedSkillPaths: [] },
+        issues: [],
+      }),
+      evaluate: async (request) =>
+        score(request, ++calls === 1 ? ["alpha"] : []),
+    }),
+  );
+  try {
+    await h.session.prompt("First task");
+    await h.session.prompt("Unrelated task");
+    assert.equal(calls, 2);
+    const second = h.payloads[1];
+    assert(second);
+    // The OpenAI adapter folds prompt deltas into the leading system message.
+    assert.doesNotMatch(
+      payloadText(second),
+      /UNIQUE_METADATA_ALPHA|UNIQUE_METADATA_BETA|<available_skills>/,
+    );
+    assert.deepEqual(h.errors, []);
+  } finally {
+    await h.close();
+  }
+});
+
+test("reloading an existing conversation clearly skips unsupported history takeover", async () => {
+  let calls = 0;
+  const diagnostics: string[] = [];
+  const h = await harness((root) =>
+    createSkillRouterExtension({
+      configuration: () => configuration(root),
+      evaluate: async (request) => {
+        calls++;
+        return score(request, ["alpha"]);
+      },
+      onDiagnostic: (message) => diagnostics.push(message),
+    }),
+  );
+  try {
+    await h.session.prompt("First task");
+    await h.session.reload();
+    await h.session.prompt("Existing history");
+    assert.equal(calls, 1);
+    assert.match(diagnostics.join("\n"), /requires a fresh session/);
+    assert.match(payloadText(h.payloads[1]), /UNIQUE_METADATA_BETA/);
     assert.deepEqual(h.errors, []);
   } finally {
     await h.close();
