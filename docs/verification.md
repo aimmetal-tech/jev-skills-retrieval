@@ -297,3 +297,38 @@ benchmark 使用独立 `profile.ts`（评估 590 秒、总路由 600 秒），�
 不是 4,392 条查询的正确率、端到端任务通过率或 Token 节省结论；没有据此估算账单。
 正式运行仍需独立新目录、按完整查询计划重新核算 HTTP 保护参数及任务时限。
 SkillsBench 的既有安全隔离不受本次改动影响，仍保留原始 87 任务分母。
+
+## 持久化 SkillRet 测试与独立重测（2026-10-18）
+
+用户要求使用 psmux，随后明确“不要恢复，直接重测”和“新旧结果分开”。
+本轮实现检查点协议 2，但启动器默认始终要求新目录、新会话，从首个查询开始。
+旧运行 `outputs/benchmark/runs/skillret-full-serial-20261018-223527` 不导入、不迁移。
+新运行通过 `psmux-session.json`、`run-start-*.json` 记录 fresh 标记与独立进程。
+
+请求发送前持久化预留，响应完整落盘后再交给 SDK；记录实际尝试次数与已知/未知 usage。
+成功真实响应保存语义哈希与正文 SHA，未来恢复时可重建 fresh Pi 内存状态和 Jev 评分，
+不重发已完成 HTTP、不重复计费。遗留 pending 记为未知；不保存认证头、cookie 或 OAuth 密钥。
+这是 SkillRet 只读任务机制，未声称支持 SkillsBench 容器变更重放。
+
+用户明确选择“记录未知用量后有限退避重试”。持久化测试支持显式
+`--continue-unknown-usage`，仅 429/529/网络异常最多额外 3 次，退避 5/15/30 秒。
+未知成本不因后续成功而清除，总 Token 与每成功任务 Token 仍未知，另报已知小计。
+Jev 每实际尝试仍 10 秒、串行、间隔 1 秒；逻辑批次 120 秒容纳退避。
+590 秒评估/600 秒总路由及 CLI 720 秒任务上限保持明确。生产插件没有增加重试。
+
+验证：
+
+- `npm run check`：85/85 测试、TypeScript、Biome 和生产构建通过。
+  首次全套出现两个 Pi 回环连接失败；独立复核 24/24、随后完整复核 85/85 通过。
+- 新检查点测试覆盖真实响应保存/重放、529 未知计费及重启、重试耗尽跨重启保留、
+  缓存与 reasoning 不重复计数、断裂日志尾部修复，以及并发写入互斥。
+- Pi 实际 HTTP 边界测试以回环假服务验证 durable Responses/Completions 和 Jev 记账。
+  这些测试不是公开 benchmark 的真实模型成绩。
+- `npm run verify:package`：40 文件由真正 Pi 1.3.0 加载，无真实模型调用。
+- PowerShell 解析器验证 `benchmark/psmux.ps1` 无语法错误。
+- psmux 3.4.0 的无害 detached fixture 在启动 shell 结束后仍能 capture-pane/list-panes；
+  夹具已单独清理。该验证不等于公开模型测试已经启动。
+
+psmux 仅保护终端断开，机器重启后仍需从本轮检查点恢复。Windows 使用原生命名 mutex
+排除双写，崩溃锁记录在取得 mutex 后归档。完整损坏的结果记录不会静默删除。
+使用方法和实际输出路径规范见 `benchmark/README.md`；SkillsBench 安全阻断仍保留。

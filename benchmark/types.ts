@@ -61,6 +61,12 @@ export interface Trial {
   relevantIds: string[];
   routeReports: RouteReport[];
   jevAttempts?: BatchAttempt[];
+  recovery?: {
+    schemaVersion: 2;
+    resumes: number;
+    replayed: { pi: number; jev: number };
+    unknownRequests: number;
+  };
   pi: Counts;
   jev: Counts;
   requests: { pi: number; jev: number };

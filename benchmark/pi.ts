@@ -20,7 +20,15 @@ import {
 } from "../src/pi-adapter.ts";
 import { skillIdentity } from "../src/selection.ts";
 import type { Budget } from "./budget.ts";
-import { BENCHMARK_ROUTER_CONFIG } from "./profile.ts";
+import {
+  atomicJson,
+  type RecoveryPolicy,
+  TrialCheckpoint,
+} from "./checkpoint.ts";
+import {
+  BENCHMARK_ROUTER_CONFIG,
+  PERSISTENT_ROUTER_CONFIG,
+} from "./profile.ts";
 import { emptyCounts, type Group, type Suite, type Trial } from "./types.ts";
 
 export interface PiTrialOptions {
@@ -47,10 +55,29 @@ export interface PiTrialOptions {
   routerDependencies?: AdapterDependencies;
   checkpoint?: string;
   onFailure?: (error: unknown) => void;
+  recovery?: {
+    directory: string;
+    scope: string;
+    policy: RecoveryPolicy;
+    afterCommit?: (kind: "pi" | "jev", sequence: number) => Promise<void>;
+  };
 }
 
 export async function runPiTrial(options: PiTrialOptions): Promise<Trial> {
   const { budget } = options;
+  const durable = options.recovery
+    ? new TrialCheckpoint(
+        options.recovery.directory,
+        options.recovery.scope,
+        budget,
+        options.recovery.policy,
+      )
+    : undefined;
+  if (durable) {
+    const final = durable.final();
+    if (final) return final;
+    durable.afterCommit = options.recovery?.afterCommit;
+  }
   const started = performance.now();
   const row: Trial = {
     schemaVersion: 1,
@@ -83,11 +110,36 @@ export async function runPiTrial(options: PiTrialOptions): Promise<Trial> {
   let assistantMessages = 0;
   let turns = 0;
   const checkpoint = () => {
+    if (durable) {
+      const stats = durable.stats();
+      row.pi = stats.pi;
+      row.jev = stats.jev;
+      row.requests = stats.requests;
+      row.elapsedMs = durable.elapsedMs;
+      row.recovery = {
+        schemaVersion: 2,
+        resumes: durable.manifest.resumes,
+        replayed: stats.replayed,
+        unknownRequests: stats.unknownRequests,
+      };
+      if (options.checkpoint) atomicJson(options.checkpoint, row);
+      return;
+    }
     if (!options.checkpoint) return;
     const temporary = `${options.checkpoint}.tmp`;
     writeFileSync(temporary, `${JSON.stringify(row)}\n`);
     renameSync(temporary, options.checkpoint);
   };
+  if (durable) {
+    durable.onChange = checkpoint;
+    checkpoint();
+    if (durable.elapsedMs >= budget.limits.taskTimeoutMs) {
+      row.status = "timeout";
+      checkpoint();
+      durable.finish(row);
+      return row;
+    }
+  }
   const readArgs = new Map<
     string,
     { path: string; offset?: number; limit?: number }
@@ -115,31 +167,38 @@ export async function runPiTrial(options: PiTrialOptions): Promise<Trial> {
     });
   };
   const transport = options.transport ?? fetch;
-  const guardedPi = budget.fetch(
-    async (input, init) => {
-      row.requests.pi++;
-      streamWasSent = true;
-      row.pi.complete = false;
-      checkpoint();
-      return transport(input, init);
-    },
-    (status) => {
-      row.httpStatus = status;
-    },
-  );
-  const guardedJev = budget.fetch(async (input, init) => {
-    row.requests.jev++;
-    row.jev.complete = false;
-    checkpoint();
-    return transport(input, init);
-  });
+  const guardedPi = durable
+    ? durable.fetch("pi", transport)
+    : budget.fetch(
+        async (input, init) => {
+          row.requests.pi++;
+          streamWasSent = true;
+          row.pi.complete = false;
+          checkpoint();
+          return transport(input, init);
+        },
+        (status) => {
+          row.httpStatus = status;
+        },
+      );
+  const guardedJev = durable
+    ? durable.fetch("jev", transport)
+    : budget.fetch(async (input, init) => {
+        row.requests.jev++;
+        row.jev.complete = false;
+        checkpoint();
+        return transport(input, init);
+      });
   const extensions: ExtensionFactory[] = [];
   if (options.group === "router") {
     extensions.push(
       createSkillRouterExtension({
         getApiKey: () => process.env.TYPESAFE_API_KEY,
         configuration: () => ({
-          config: { ...BENCHMARK_ROUTER_CONFIG, pinnedSkillPaths: [] },
+          config: {
+            ...(durable ? PERSISTENT_ROUTER_CONFIG : BENCHMARK_ROUTER_CONFIG),
+            pinnedSkillPaths: [],
+          },
           issues: [],
         }),
         fetch: guardedJev,
@@ -147,6 +206,11 @@ export async function runPiTrial(options: PiTrialOptions): Promise<Trial> {
         onAttempt: (attempt) => {
           row.jevAttempts ??= [];
           row.jevAttempts.push(attempt);
+          if (durable) {
+            checkpoint();
+            options.routerDependencies?.onAttempt?.(attempt);
+            return;
+          }
           // Logical calls rejected by the HTTP cap did not send another request.
           if (row.requests.jev > accountedJev) {
             accountedJev++;
@@ -169,7 +233,7 @@ export async function runPiTrial(options: PiTrialOptions): Promise<Trial> {
         },
         onReport: (report) => {
           row.routeReports.push(report);
-          if (accountedJev < row.requests.jev) {
+          if (!durable && accountedJev < row.requests.jev) {
             row.jev.complete = false;
             budget.account(null);
           }
@@ -246,6 +310,7 @@ export async function runPiTrial(options: PiTrialOptions): Promise<Trial> {
           context,
           {
             ...opt,
+            ...(durable ? { sessionId: durable.manifest.sessionId } : {}),
             maxTokens: budget.limits.maxOutputTokens,
             maxRetries: 0,
             fetch: guardedPi,
@@ -271,6 +336,7 @@ export async function runPiTrial(options: PiTrialOptions): Promise<Trial> {
       streamWasSent = false;
       return nativeStream(model, context, {
         ...opt,
+        ...(durable ? { sessionId: durable.manifest.sessionId } : {}),
         reasoning: "medium",
         maxTokens: budget.limits.maxOutputTokens,
         maxRetries: 0,
@@ -383,7 +449,9 @@ export async function runPiTrial(options: PiTrialOptions): Promise<Trial> {
     if (event.type === "message_end" && event.message.role === "assistant") {
       assistantMessages++;
       const u = event.message.usage;
-      if (rawUsageSeen) {
+      if (durable) {
+        checkpoint();
+      } else if (rawUsageSeen) {
         accountedPi++;
         row.pi.complete = accountedPi === row.requests.pi;
         row.pi.input += u.input;
@@ -413,10 +481,13 @@ export async function runPiTrial(options: PiTrialOptions): Promise<Trial> {
       checkpoint();
     }
   });
-  const timer = setTimeout(() => {
-    row.status = "timeout";
-    void session.abort();
-  }, budget.limits.taskTimeoutMs);
+  const timer = setTimeout(
+    () => {
+      row.status = "timeout";
+      void session.abort();
+    },
+    Math.max(1, budget.limits.taskTimeoutMs - (durable?.elapsedMs ?? 0)),
+  );
   try {
     await session.prompt(options.prompt);
     if (!assistantMessages && row.status === "completed")
@@ -428,8 +499,9 @@ export async function runPiTrial(options: PiTrialOptions): Promise<Trial> {
     clearTimeout(timer);
     session.dispose();
   }
-  row.elapsedMs = performance.now() - started;
+  row.elapsedMs = durable?.elapsedMs ?? performance.now() - started;
   checkpoint();
+  durable?.finish(row);
   return row;
 }
 

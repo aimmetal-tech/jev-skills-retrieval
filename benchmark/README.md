@@ -87,7 +87,7 @@ npm run benchmark:verify
 与两组 Pi。它只使用回环假模型与假 Jev，不运行公开 CVE 任务；输出醒目标记 MOCK，
 不能视为真实模型成绩。Docker 镜像构建需要网络和本地 Docker 权限。
 
-## 将来启动真实测试
+## 启动真实测试
 
 执行模型使用 `sources.json` 中的 **`(openai) gpt-6-luna`**，保持 **medium**。
 通过原生 ModelRuntime 读取 Pi 已登录账户和模型目录（`~/.pi/agent/auth.json`、
@@ -111,19 +111,61 @@ npm run benchmark -- --live --suite all --output runs/full-001 --max-requests <H
 
 `--suite skillret|skillsbench|all` 默认 all。输出路径相对于 `outputs/benchmark/`。
 源文件指纹、两组协议、数据版本和默认配置写入 `run.json`。
-全量 SkillRet 每次把 6,006 个候选放入一次 Jev 批量请求，容量/超时尚未实测；
+全量 SkillRet 对全部 6,006 个候选做串行分批评分，无预筛选；完整成功后全局选择。
 超限、超时和回退如实记录，不把回退全库算作正确路由。
 
 HTTP 上限在实际 fetch 之前检查，Pi 和 Jev 共用计数。Token 停止阈值按已收到的 usage 检查，
-**不是严格费用封顶**：一个在途响应可能超过剩余 Token；缺失 usage 会停止后续请求。
+**不是严格费用封顶**：一个在途响应可能超过剩余 Token；默认缺失 usage 会停止后续请求。
+用户已明确授权持久化测试使用 `--continue-unknown-usage`：记录未知成本后有限重试。
+有未知用量时总 Token 和每成功任务 Token 保持未知，仅另外报告已知小计。
 缓存只计一次，reasoning 是 output 子项，不重复相加。未提供价格，不推断账单美元。
 每成功任务成本 = 本组所有尝试的 Pi+Jev 总 Token / 成功任务数；失败尝试也计成本。
 
-逐条结果写 `results.jsonl`，每次传输开始和模型完成后写该 trial 的 `partial.json`。
+逐条结果 fsync 写 `results.jsonl`，每次传输开始和响应落盘后原子写该 trial 的 `partial.json`。
 verifier 异常保留已观察到的模型 usage，单独标记 verifier error。
-`--resume --output runs/full-001` 继续未尝试的组合，必须保持相同代码、模型及套件，
-不会重试失败样本；可提高累计预算。存在未知 usage 或遗留 running.lock 时拒绝自动继续。
-崩溃后先核对 partial 与已消耗请求，再人工处理锁，避免漏记费用。
+
+### psmux 从头重测与独立结果
+
+```powershell
+pwsh -NoLogo -NoProfile -File benchmark/psmux.ps1 -Output runs/skillret-retest-v2-<时间戳> -Namespace jev-retest-<时间戳> -Session skillret-retest
+psmux -L jev-retest-<时间戳> attach -t skillret-retest
+psmux -L jev-retest-<时间戳> capture-pane -p -t skillret-retest
+```
+
+启动器要求全新的目录和会话，不读取、续跑或合并旧运行。`psmux-session.json` 和
+`run-start-*.json` 标明 `resume/resumed=false`、`oldResultsImported=false`。
+旧目录 `runs/skillret-full-serial-20261018-223527` 保持原状；本次结果只来自新目录。
+每个新运行拥有独立 `run.json`、`results.jsonl`、检查点和图表，不能合并后声称同一轮成绩。
+
+启动器只跑全量 SkillRet 两组（4,392 查询，各一次），沿用原生 OAuth、medium、并发 1。
+实际 HTTP 上限 700,000，已知 Token 停止阈值 100,000,000,000，每任务 12 轮、
+每响应输出 4,096、每任务 720 秒。这些是运行保护，不是费用预测。
+SkillsBench 仍被安全隔离项阻断，未启动，也未缩减原始 87 任务分母。
+
+psmux 的 detached 会话独立于启动终端；关闭终端不会结束 benchmark。
+psmux 不保证机器重启后进程存活。状态应同时核对 `running.lock` 的进程和
+`progress.json`、`active-trial.json`、trial 的 `partial.json`，不能只看 pane 存活。
+控制台日志为 `psmux-console.log`，结束记录为 `psmux-exit.json`。
+
+### 检查点协议 2 与未来恢复
+
+`checkpoint.ts` 在实际 HTTP 前 fsync 保存 pending 预留；响应完整读取并 fsync 后再交 SDK。
+每次尝试保存状态码、实际 usage、耗时与安全 request ID，不保存认证头或 cookie。
+成功且 usage 完整的真实响应正文留在本地 `checkpoint/pi-*.json`、`jev-*.json`，
+用于恢复 fresh Pi 内存会话和已付费 Jev 评分。正文含公开 benchmark 内容，不宜随意分享。
+重放先验证请求语义哈希与响应 SHA；不另发 HTTP、不重复计费，不能作为新独立重复实验。
+崩溃遗留 pending 一律记为未知，不能当作免费或零 Token。
+
+429、529、网络异常最多额外重试 3 次，等待 5/15/30 秒；尊重最长 60 秒服务 cooldown，
+更长 cooldown 不提前重试。次数跨重启保留，永久 4xx 停止。生产插件仍零重试。
+实际 Jev 每次 10 秒；持久化 profile 的逻辑批次给 120 秒容纳重试，
+整轮路由仍为评估 590 秒/总 600 秒，任务 CLI 上限仍生效。
+
+未来确需恢复**同一新运行**时，在相同 launcher 命令上加 `-Resume`。
+要求相同代码指纹、模型、套件、每任务参数及协议 2；可提高累计预算。
+已完成 trial 不重跑，未完成 SkillRet trial 重建上下文并复用已保存的真实响应。
+Windows 原生命名 mutex 防止双写；崩溃释放后旧锁记录归档。结果日志只修复断裂尾部，
+完整损坏记录不会静默丢弃。旧版运行不迁移；SkillsBench 容器写操作不支持该响应重放。
 
 重新生成报告不调用模型：
 
@@ -168,7 +210,7 @@ npm run benchmark -- --report --output runs/full-001
 这些诊断结果与正式检索/任务完成率报告分开。
 
 `outputs/benchmark/data/` 保存固定数据、映射及 manifest；`.venv/` 为隔离 Python 依赖，
-`preview/` 是空结果/预检报告，`verification/` 是 MOCK 证据，`runs/<id>/` 是将来的真实结果。
+`preview/` 是空结果/预检报告，`verification/` 是 MOCK 证据，`runs/<id>/` 是各轮独立真实结果。
 每个报告包含 `run.json`、`results.jsonl`、`results.csv`、`summary.json`、
 `comparison.png`、`comparison.svg` 和自包含 `report.html`。这些文件全部被 Git 忽略。
 
@@ -176,4 +218,6 @@ npm run benchmark -- --report --output runs/full-001
 `pi.ts` 固定 Pi 会话与观测；`remote.ts`、`task-worker.ts`、`skillsbench.py` 负责容器桥接；
 `benchflow_compat.py` 为已验证的 Windows 容器路径修正；`metrics.ts` 与 `report.py` 计算和绘图；
 `selftest.ts` 验证无害 Docker 夹具；`diagnose-routing.ts` 诊断完整目录串行分批路由。
+`checkpoint.ts` 负责逐请求持久化与恢复；`recovery.ts` 负责互斥锁和结果日志；
+`psmux.ps1` 负责独立持久会话、固定运行参数和控制台记录。
 来源锁、依赖锁与安全阻断清单在本目录。

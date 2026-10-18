@@ -5,7 +5,11 @@ export class Budget {
   requests = 0;
   tokens = 0;
   stopped: string | undefined;
-  constructor(readonly limits: Limits) {
+  unknownRequests = 0;
+  constructor(
+    readonly limits: Limits,
+    readonly continueUnknownUsage = false,
+  ) {
     for (const value of Object.values(limits)) {
       if (!Number.isSafeInteger(value) || value <= 0)
         throw new Error("Limits must be positive integers");
@@ -22,8 +26,10 @@ export class Budget {
     }
   }
   account(tokens: number | null) {
-    if (tokens === null) this.stopped ??= "unknown_usage";
-    else this.tokens += tokens;
+    if (tokens === null) {
+      this.unknownRequests++;
+      if (!this.continueUnknownUsage) this.stopped ??= "unknown_usage";
+    } else this.tokens += tokens;
   }
   fetch(
     transport: typeof fetch = fetch,

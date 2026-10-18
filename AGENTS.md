@@ -85,6 +85,24 @@ to `~/.jev-skill-router/credentials.json`; never to project config or session da
   600s total, serial batches; interactive defaults remain 10s evaluation/15s total.
   Benchmark task timeout is still an explicit CLI guard; use at least 720s to leave
   Pi execution time after full routing. Never silently raise a supplied guard.
+  `checkpoint.ts` implements checkpoint protocol 2 for SkillRet trials: fsynced
+  pending HTTP reservations, sanitized attempt usage, hashes and locally retained
+  successful real provider bodies. Matching responses replay into a fresh Pi
+  session without another paid request; authorization/cookies are never saved.
+  `recovery.ts` owns the run lease (Windows native named mutex via a hidden helper;
+  POSIX loopback lease), fsynced result journal and conservative torn-tail repair.
+  `psmux.ps1` starts a detached named psmux session with a fresh output directory
+  by default; `-Resume` is explicit and only supports identical protocol-2 code,
+  model, suite and task guards. Never import legacy evidence into a new run.
+  psmux protects terminal disconnects, not reboot; checkpoints support later restart.
+  User explicitly authorized unknown-cost recording followed by bounded backoff
+  retries in this persistent benchmark: `--continue-unknown-usage` retains unknown
+  totals, retries only 429/529/transport failures up to 3 additional attempts with
+  5/15/30s backoff (honoring server cooldowns up to 60s). Retry counts persist.
+  Every Jev actual attempt remains capped at 10s, concurrency 1 and 1s spacing;
+  the persistent profile allows 120s per logical batch for backoff, while keeping
+  590s evaluation/600s total and the explicit 720s task guard. Production routing
+  still has zero retries. SkillsBench sandbox mutations do not use response replay.
   `diagnose-routing.ts` verifies the full 6,006-skill request-local snapshot offline
   by default; `--live` sends at most 128 serial Jev requests, with no Pi generation.
   It requires a fresh output directory, checkpoints attempts.jsonl/partial.json,
@@ -143,6 +161,11 @@ The benchmark accounts/checkpoints actual dispatched HTTP attempts there; the fi
 route report only summarizes them. Logical SDK attempts blocked before fetch are
 not counted as actual HTTP. Known partial costs survive failure; unknown usage and
 permanent HTTP errors still stop further budgeted traffic.
+The persistent SkillRet benchmark is an explicit user-authorized exception to
+unknown-usage stopping: unknown costs remain visible, full token totals and
+tokens-per-success stay unknown, and only known subtotals feed the token guard.
+Fresh retests require separate directories, start metadata with no imported old
+results, and independent psmux sessions. Preserve all earlier evidence unchanged.
 `/jev-skill apikey` saves the same credential used by the blocking gate to the user
 file; `apikey reset` removes the file and cache. It takes no plaintext key argument.
 `/jev-skill baseurl [URL|reset]` updates only
@@ -205,6 +228,17 @@ conversation history. `/jev-skill status` displays source/presence, never key va
   Actual HTTP requests are capped before fetch. Tokens are an observed response
   boundary stop, not a strict monetary cap; unknown usage stops further requests.
   Preserve raw trial evidence and coverage; mock/empty charts are labelled clearly.
+  `pwsh -NoProfile -File benchmark/psmux.ps1 -Output runs/<fresh-id> -Namespace
+  <unique-namespace> -Session <unique-session>` starts a fresh detached full
+  SkillRet two-group run with the authorized persistent retry policy. It refuses
+  existing output/session names. Attach with `psmux -L <namespace> attach -t
+  <session>`; check `progress.json`, `active-trial.json`, trial `partial.json`,
+  `checkpoint/` and `psmux-console.log`. `psmux-exit.json` records process exit;
+  a live pane alone is not evidence that the benchmark process is running.
+  `tests/checkpoint.test.ts` covers paid-response replay, unknown retries/restart,
+  exhausted attempt persistence, cache/reasoning accounting, journal repair and
+  concurrent-writer exclusion. Pi HTTP-boundary tests cover durable Responses
+  and Completions accounting with fake providers, without real account access.
 - `npm run benchmark:verify`: explicit harmless Docker/BenchFlow/Pi integration
   using loopback fake providers, no public CVE tasks and no real model calls.
   Python dependency setup and resume/report commands are in benchmark/README.md.

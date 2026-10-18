@@ -7,3 +7,9 @@ export const BENCHMARK_ROUTER_CONFIG = {
   evaluationTimeoutMs: 590000,
   routeTimeoutMs: 600000,
 };
+
+/** Includes bounded HTTP recovery within one logical Jev batch. */
+export const PERSISTENT_ROUTER_CONFIG = {
+  ...BENCHMARK_ROUTER_CONFIG,
+  batchTimeoutMs: 120000,
+};

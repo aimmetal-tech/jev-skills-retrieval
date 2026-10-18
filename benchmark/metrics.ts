@@ -80,6 +80,13 @@ export function summarizeTrials(
         piTokensKnown: pi,
         jevTokensKnown: jev,
         usageComplete: completeUsage,
+        unknownUsageRequests: subset.reduce(
+          (n, r) =>
+            n +
+            (r.recovery?.unknownRequests ??
+              (!r.pi.complete || !r.jev.complete ? 1 : 0)),
+          0,
+        ),
         totalTokens: completeUsage ? pi + jev : null,
         tokensPerSuccess:
           completeUsage && successes ? (pi + jev) / successes : null,

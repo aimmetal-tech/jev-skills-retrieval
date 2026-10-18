@@ -9,6 +9,7 @@ import {
   ModelRuntime,
 } from "@earendil-works/pi-coding-agent";
 import { Budget } from "../benchmark/budget.ts";
+import { RECOVERY_POLICY } from "../benchmark/checkpoint.ts";
 import { retrieval, summarizeTrials } from "../benchmark/metrics.ts";
 import { runPiTrial } from "../benchmark/pi.ts";
 import { sandboxPath, shellQuote } from "../benchmark/remote.ts";
@@ -108,6 +109,7 @@ async function boundary(
   forbidden = false,
   batched = false,
   unknownJev = false,
+  durable = false,
 ) {
   const root = await mkdtemp(resolve(tmpdir(), "jev-benchmark-"));
   const payloads: string[] = [];
@@ -227,6 +229,20 @@ async function boundary(
       evidence: "mock",
       budget,
       checkpoint,
+      ...(durable
+        ? {
+            recovery: {
+              directory: resolve(root, "recovery"),
+              scope: "native-boundary-fixture",
+              policy: {
+                ...RECOVERY_POLICY,
+                maxRetries: 0,
+                retryDelaysMs: [0],
+                jevIntervalMs: 0,
+              },
+            },
+          }
+        : {}),
       routerDependencies: {
         getApiKey: () => "fake-jev-only",
         configuration: () => ({
@@ -317,6 +333,24 @@ test("serial Jev batches are accounted once before the HTTP cap or unknown usage
   assert.equal(unknown.row.jev.complete, false);
   assert.equal(unknown.budget.tokens, 42);
   assert.equal(unknown.budget.stopped, "unknown_usage");
+});
+
+test("durable real Pi boundary records Jev probabilities and reconstructible provider responses without changing usage", async () => {
+  for (const group of ["native", "router"] as const) {
+    const result = await boundary(group, 10, true, false, true, false, true);
+    assert.equal(result.row.status, "completed");
+    assert.equal(result.row.pi.total, 216);
+    assert.equal(result.row.jev.total, group === "router" ? 44 : 0);
+    assert.equal(
+      result.budget.tokens,
+      result.row.pi.total + result.row.jev.total,
+    );
+    assert.equal(result.row.recovery?.unknownRequests, 0);
+    assert.deepEqual(
+      result.row.reads.map((r) => r.id),
+      ["alpha"],
+    );
+  }
 });
 
 test("sandbox namespace mapping and shell quoting do not execute text locally", () => {
@@ -473,6 +507,11 @@ test("native account mode preserves Responses, medium thinking and response usag
     model: "gpt-6-luna",
     nativeOAuth: true,
     nativeRuntime: runtime,
+    recovery: {
+      directory: resolve(root, "native-checkpoint"),
+      scope: "responses-native-fixture",
+      policy: { ...RECOVERY_POLICY, maxRetries: 0, jevIntervalMs: 0 },
+    },
     evidence: "mock" as const,
     budget: new Budget(limits),
   };

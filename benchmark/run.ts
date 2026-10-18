@@ -1,18 +1,23 @@
 import { spawn } from "node:child_process";
-import {
-  appendFile,
-  mkdir,
-  readdir,
-  readFile,
-  writeFile,
-} from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { Budget } from "./budget.ts";
+import {
+  atomicJson,
+  CHECKPOINT_VERSION,
+  RECOVERY_POLICY,
+  type RecoveryPolicy,
+} from "./checkpoint.ts";
 import { contained, json, jsonl, loadSkillret, sha256 } from "./data.ts";
 import { summarizeTrials } from "./metrics.ts";
 import { mappingIds, runPiTrial } from "./pi.ts";
-import { BENCHMARK_ROUTER_CONFIG } from "./profile.ts";
+import { PERSISTENT_ROUTER_CONFIG } from "./profile.ts";
+import {
+  acquireRunLock,
+  commitTrial,
+  readCommittedTrials,
+} from "./recovery.ts";
 import { createBenchmarkTransport } from "./transport.ts";
 import type { Group, Limits, Trial } from "./types.ts";
 
@@ -64,7 +69,7 @@ async function frozenFingerprint() {
   ];
   for (const directory of ["src", "benchmark"]) {
     for (const file of (await readdir(resolve(project, directory)))
-      .filter((f) => /\.(ts|py)$/.test(f))
+      .filter((f) => /\.(ts|py|ps1)$/.test(f))
       .sort())
       files.push(`${directory}/${file}`);
   }
@@ -168,6 +173,7 @@ async function main() {
       preflight: { type: "boolean" },
       report: { type: "boolean" },
       resume: { type: "boolean" },
+      "continue-unknown-usage": { type: "boolean" },
       suite: { type: "string", default: "all" },
       output: { type: "string" },
       "max-requests": { type: "string" },
@@ -224,8 +230,27 @@ async function main() {
       );
   await mkdir(output, { recursive: true });
   const fingerprint = await frozenFingerprint();
+  const resumeMeta = values.resume
+    ? await json<{
+        fingerprint: { digest: string };
+        model: string;
+        expectedPerGroup: Record<string, number>;
+        checkpointVersion?: number;
+        recoveryPolicy?: RecoveryPolicy;
+        limits: Limits;
+      }>(resolve(output, "run.json"))
+    : undefined;
+  const recoveryPolicy: RecoveryPolicy = {
+    ...RECOVERY_POLICY,
+    continueUnknownUsage:
+      values["continue-unknown-usage"] ??
+      resumeMeta?.recoveryPolicy?.continueUnknownUsage ??
+      false,
+  };
   const baseMeta = {
     schemaVersion: 1,
+    checkpointVersion: CHECKPOINT_VERSION,
+    recoveryPolicy,
     sourceLock,
     fingerprint,
     expectedPerGroup: expected,
@@ -241,7 +266,7 @@ async function main() {
         ? "native-provider"
         : "openai-completions",
     reasoningEffort: sourceLock.executionThinking ?? "none",
-    routerConfig: BENCHMARK_ROUTER_CONFIG,
+    routerConfig: PERSISTENT_ROUTER_CONFIG,
     isolation: {
       autoDiscovery: false,
       otherExtensions: false,
@@ -250,7 +275,7 @@ async function main() {
       pi: "1.3.0",
     },
     budgetPolicy:
-      "Actual HTTP request cap; observed token stop after each response, unknown usage stops further requests; no retries",
+      "Durable request reservations; replay is not a new call; known-token boundary stop; unknown costs remain unknown; explicitly enabled bounded recovery retries",
     status: "prepared",
   };
   if (!values.live) {
@@ -323,51 +348,88 @@ async function main() {
     apiRoot.hash
   )
     throw new Error("Invalid LLM_BASE_URL");
-  const previous: Trial[] = values.resume
-    ? await jsonl<Trial>(resolve(output, "results.jsonl"))
-    : [];
-  if (values.resume) {
-    const old = await json<{
-      fingerprint: { digest: string };
-      model: string;
-      expectedPerGroup: Record<string, number>;
-    }>(resolve(output, "run.json"));
+  if (resumeMeta) {
+    if (resumeMeta.checkpointVersion !== CHECKPOINT_VERSION)
+      throw new Error(
+        "Resume requires checkpoint protocol 2; legacy evidence is unchanged",
+      );
     if (
-      old.fingerprint.digest !== fingerprint.digest ||
-      old.model !== sourceLock.executionModel ||
-      JSON.stringify(old.expectedPerGroup) !== JSON.stringify(expected)
+      resumeMeta.fingerprint.digest !== fingerprint.digest ||
+      resumeMeta.model !== sourceLock.executionModel ||
+      JSON.stringify(resumeMeta.expectedPerGroup) !== JSON.stringify(expected)
     )
       throw new Error("Resume requires identical source, model and suite");
-    if (previous.some((r) => !r.pi.complete || !r.jev.complete))
-      throw new Error("Unknown usage prevents automatic budget-safe resume");
-  } else {
-    await writeFile(resolve(output, "results.jsonl"), "", { flag: "wx" });
+    for (const key of ["maxTurns", "maxOutputTokens", "taskTimeoutMs"] as const)
+      if (resumeMeta.limits[key] !== limits[key])
+        throw new Error("Resume requires identical per-task protocol limits");
   }
-  // Exclusive run lock: an interrupted run must be inspected before its lock is removed.
-  const lock = await import("node:fs/promises").then((fs) =>
-    fs.open(resolve(output, "running.lock"), "wx"),
-  );
-  const budget = new Budget(limits);
-  const transport = createBenchmarkTransport();
+  const lock = await acquireRunLock(output);
+  let previous: Trial[];
+  try {
+    if (values.resume)
+      previous = readCommittedTrials(resolve(output, "results.jsonl"));
+    else {
+      await writeFile(resolve(output, "results.jsonl"), "", { flag: "wx" });
+      previous = [];
+    }
+    if (
+      !recoveryPolicy.continueUnknownUsage &&
+      previous.some((r) => !r.pi.complete || !r.jev.complete)
+    )
+      throw new Error(
+        "Unknown usage prevents automatic resume without explicit acknowledgement",
+      );
+  } catch (error) {
+    await lock.close();
+    throw error;
+  }
+  const budget = new Budget(limits, recoveryPolicy.continueUnknownUsage);
+  let transport: ReturnType<typeof createBenchmarkTransport>;
+  try {
+    transport = createBenchmarkTransport();
+  } catch (error) {
+    await lock.close();
+    throw error;
+  }
   const originalFetch = globalThis.fetch;
   globalThis.fetch = transport.fetch; // Also lets native OAuth refresh use the same process-local proxy.
   for (const row of previous) {
     budget.requests += row.requests.pi + row.requests.jev;
-    budget.tokens += row.pi.total + row.jev.total;
+    budget.account(row.pi.total + row.jev.total);
+    for (
+      let i = 0;
+      i <
+      (row.recovery?.unknownRequests ??
+        (!row.pi.complete || !row.jev.complete ? 1 : 0));
+      i++
+    )
+      budget.account(null);
   }
   const rows = [...previous];
   const completed = new Set(
     rows.map((r) => `${r.suite}/${r.caseId}/${r.group}`),
   );
   let status = "running";
-  await writeFile(
-    resolve(output, "run.json"),
-    JSON.stringify(
-      { ...baseMeta, limits, status, transport: transport.mode },
-      null,
-      2,
-    ),
-  );
+  try {
+    atomicJson(resolve(output, "run.json"), {
+      ...baseMeta,
+      limits,
+      status,
+      transport: transport.mode,
+    });
+    atomicJson(resolve(output, `run-start-${Date.now()}.json`), {
+      ...baseMeta,
+      limits,
+      resumed: !!values.resume,
+      processId: process.pid,
+      oldResultsImported: false,
+    });
+  } catch (error) {
+    globalThis.fetch = originalFetch;
+    await transport.close();
+    await lock.close();
+    throw error;
+  }
   try {
     // Preflight both locked datasets before any paid traffic.
     const loaded = await loadSkillret(data);
@@ -399,12 +461,20 @@ async function main() {
         ? ["router", "native"]
         : ["native", "router"]) as Group[]) {
         if (completed.has(`${job.suite}/${job.id}/${group}`)) continue;
-        budget.check();
+        if (budget.stopped) throw new Error("benchmark_budget_stopped");
         const trialDir = contained(
           output,
           `trials/${job.suite}/${job.id}/${group}`,
         );
         await mkdir(trialDir, { recursive: true });
+        const trialKey = `${job.suite}/${job.id}/${group}`;
+        atomicJson(resolve(output, "active-trial.json"), {
+          schemaVersion: 2,
+          key: trialKey,
+          suite: job.suite,
+          caseId: job.id,
+          group,
+        });
         let row: Trial;
         if (job.suite === "skillret") {
           const query = loaded.queries.find((q) => q.id === job.id);
@@ -430,8 +500,23 @@ async function main() {
               : {}),
             budget,
             checkpoint: resolve(trialDir, "partial.json"),
+            recovery: {
+              directory: resolve(trialDir, "checkpoint"),
+              scope: sha256(
+                JSON.stringify({
+                  fingerprint: fingerprint.digest,
+                  trialKey,
+                  model: sourceLock.executionModel,
+                  maxTurns: limits.maxTurns,
+                  maxOutputTokens: limits.maxOutputTokens,
+                  taskTimeoutMs: limits.taskTimeoutMs,
+                }),
+              ),
+              policy: recoveryPolicy,
+            },
           });
         } else {
+          budget.check();
           const config = {
             task: resolve(data, "skillsbench/tasks", job.id),
             output: trialDir,
@@ -469,10 +554,19 @@ async function main() {
           if (result.stopped) budget.stopped = result.stopped;
         }
         rows.push(row);
-        await appendFile(
-          resolve(output, "results.jsonl"),
-          `${JSON.stringify(row)}\n`,
-        );
+        commitTrial(resolve(output, "results.jsonl"), row);
+        atomicJson(resolve(output, "active-trial.json"), {
+          schemaVersion: 2,
+          key: null,
+        });
+        atomicJson(resolve(output, "progress.json"), {
+          updatedAt: new Date().toISOString(),
+          pid: process.pid,
+          completedTrials: rows.length,
+          requests: budget.requests,
+          knownTokens: budget.tokens,
+          unknownRequests: budget.unknownRequests,
+        });
         await writeReport(output, rows, expected, true);
         console.log(
           `${rows.length}: ${job.suite}/${job.id}/${group} ${row.status}`,
@@ -484,21 +578,15 @@ async function main() {
     status = budget.stopped ? `stopped:${budget.stopped}` : "harness_error";
     process.exitCode = 1;
   } finally {
-    await writeFile(
-      resolve(output, "run.json"),
-      JSON.stringify(
-        {
-          ...baseMeta,
-          limits,
-          status,
-          requests: budget.requests,
-          knownTokens: budget.tokens,
-          transport: transport.mode,
-        },
-        null,
-        2,
-      ),
-    );
+    atomicJson(resolve(output, "run.json"), {
+      ...baseMeta,
+      limits,
+      status,
+      requests: budget.requests,
+      knownTokens: budget.tokens,
+      unknownRequests: budget.unknownRequests,
+      transport: transport.mode,
+    });
     try {
       await writeReport(output, rows, expected, true);
       await subprocess(python, ["benchmark/report.py", output]);
@@ -506,9 +594,6 @@ async function main() {
       globalThis.fetch = originalFetch;
       await transport.close();
       await lock.close();
-      await import("node:fs/promises").then((fs) =>
-        fs.unlink(resolve(output, "running.lock")),
-      );
     }
   }
 }
