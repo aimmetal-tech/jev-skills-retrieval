@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  rm,
+  symlink,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -18,7 +25,10 @@ import {
 import { route } from "../src/router.ts";
 import {
   autoCandidates,
+  pinnedSkills,
+  prepareCatalog,
   selectAutomatic,
+  skillIdentity,
   uniqueSkills,
 } from "../src/selection.ts";
 
@@ -40,6 +50,218 @@ function skill(name: string, path = name): Skill {
 }
 const config = { ...DEFAULT_CONFIG, pinnedSkillPaths: [] };
 const state = buildRoutingState("Current requirements", [], [], config);
+
+test("a full request resolves each path once and reuses candidate IDs through selection and fallback", async () => {
+  const skills = Array.from({ length: 6006 }, (_, i) => skill(`item-${i}`));
+  let calls = 0;
+  const prepared = prepareCatalog([...skills, skills[0] as Skill], {
+    identity: (path) => {
+      calls++;
+      return path;
+    },
+  });
+  assert.equal(calls, 6006);
+  assert.equal(prepared.catalog.length, 6006);
+  assert.equal(prepared.candidates.length, 6006);
+  const before = prepared.candidates.map((c) => c.id);
+  const request = {
+    catalog: skills,
+    pinned: [],
+    prepared,
+    state,
+    config,
+    signal: undefined,
+    issues: [],
+  };
+  const success = await route(request, async ({ candidates }) => {
+    assert.equal(candidates, prepared.candidates);
+    return {
+      probabilities: { [candidates[0]?.id as string]: 0.9 },
+      model: "test",
+      usage: { input_tokens: 1, output_tokens: 1 },
+    };
+  });
+  assert.deepEqual(success.skills, [skills[0]]);
+  const failure = await route(request, async () => {
+    throw new RoutingFailure("service_error", "test failure");
+  });
+  assert.equal(failure.report.status, "fallback");
+  assert.deepEqual(failure.skills, skills);
+  assert.deepEqual(
+    prepared.candidates.map((c) => c.id),
+    before,
+  );
+  assert.equal(calls, 6006);
+  pinnedSkills(skills, [], () => {
+    throw new Error("Empty pins must not build an index");
+  });
+});
+
+test("snapshots preserve real path aliases, pinned clones and fresh identities on the next request", async () => {
+  const root = await mkdtemp(join(tmpdir(), "jev-snapshot-"));
+  try {
+    const one = join(root, "one");
+    const two = join(root, "two");
+    const alias = join(root, "alias");
+    await mkdir(one);
+    await mkdir(two);
+    await writeFile(join(one, "SKILL.md"), "one");
+    await writeFile(join(two, "SKILL.md"), "two");
+    await symlink(one, alias, "junction");
+    const original = {
+      ...skill("one", one),
+      filePath: join(one, "SKILL.md"),
+      disableModelInvocation: true,
+    };
+    const aliased = { ...original, filePath: join(alias, "SKILL.md") };
+    const other = { ...skill("two", two), filePath: join(two, "SKILL.md") };
+    const first = prepareCatalog([original, aliased, other], {
+      pinnedPaths: [aliased.filePath],
+    });
+    assert.deepEqual(first.catalog, [original, other]);
+    assert.equal(first.pinned[0]?.disableModelInvocation, false);
+    assert.equal(original.disableModelInvocation, true);
+    assert.deepEqual(
+      first.candidates.map((c) => c.skill),
+      [other],
+    );
+    assert.equal(first.candidates[0]?.id, autoCandidates([other], [])[0]?.id);
+    const old = skillIdentity(aliased.filePath);
+    await unlink(alias);
+    await symlink(two, alias, "junction");
+    const second = prepareCatalog([original, aliased, other]);
+    assert.notEqual(skillIdentity(aliased.filePath), old);
+    assert.deepEqual(second.catalog, [original, aliased]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("preparation consumes the total deadline and pre-aborted routing skips catalog access", async () => {
+  let evaluations = 0;
+  const prepared = prepareCatalog([skill("one")]);
+  const result = await route(
+    {
+      catalog: prepared.catalog,
+      pinned: [],
+      prepared,
+      preparationMs: 21,
+      state,
+      config: { ...config, routeTimeoutMs: 20 },
+      signal: undefined,
+      issues: [],
+    },
+    async () => {
+      evaluations++;
+      throw new Error("Deadline already consumed");
+    },
+  );
+  assert.equal(result.report.reason, "timeout");
+  assert.equal(result.report.timings?.evaluationMs, 0);
+  assert((result.report.timings?.preparationMs ?? 0) >= 21);
+  const cancelled = await route(
+    {
+      get catalog(): Skill[] {
+        throw new Error("Must not inspect catalog");
+      },
+      pinned: [],
+      state,
+      config,
+      signal: AbortSignal.abort(),
+      issues: [],
+    },
+    async () => {
+      throw new Error("Must not evaluate");
+    },
+  );
+  assert.equal(cancelled.report.status, "cancelled");
+  assert.equal(evaluations, 0);
+});
+
+test("preparation and evaluation caps remain independent under a tighter total deadline", async () => {
+  const prepared = prepareCatalog([skill("one")]);
+  const request = {
+    catalog: prepared.catalog,
+    pinned: [],
+    prepared,
+    state,
+    config,
+    signal: undefined,
+    issues: [],
+  };
+  let calls = 0;
+  const local = await route(
+    {
+      ...request,
+      preparationMs: 51,
+      config: { ...config, preparationTimeoutMs: 50 },
+    },
+    async () => {
+      calls++;
+      throw new Error("Must not reach evaluator");
+    },
+  );
+  assert.equal(local.report.timeoutPhase, "preparation");
+  assert.equal(calls, 0);
+  let abort: AbortSignal | undefined;
+  const remote = await route(
+    {
+      ...request,
+      config: { ...config, routeTimeoutMs: 200, evaluationTimeoutMs: 20 },
+    },
+    async (r) => {
+      assert(r.timeoutMs <= 20);
+      abort = r.signal;
+      return new Promise(() => {});
+    },
+  );
+  assert.equal(remote.report.timeoutPhase, "evaluation");
+  assert.equal(abort?.aborted, true);
+  assert((remote.report.timings?.evaluationMs ?? 0) >= 10);
+  const total = await route(
+    {
+      ...request,
+      preparationMs: 25,
+      config: { ...config, routeTimeoutMs: 40, evaluationTimeoutMs: 200 },
+    },
+    async (r) => {
+      assert(r.timeoutMs <= 15);
+      return new Promise(() => {});
+    },
+  );
+  assert.equal(total.report.timeoutPhase, "total");
+  assert.equal(total.report.reason, "timeout");
+});
+
+test("synchronous SDK construction cannot accept a result after its evaluation deadline", async () => {
+  let signal: AbortSignal | undefined;
+  const result = await route(
+    {
+      catalog: [skill("one")],
+      pinned: [],
+      state,
+      config: { ...config, evaluationTimeoutMs: 5 },
+      signal: undefined,
+      issues: [],
+    },
+    async (request) => {
+      signal = request.signal;
+      const end = performance.now() + 15;
+      while (performance.now() < end) {
+        /* Simulate synchronous SDK work. */
+      }
+      return {
+        probabilities: {},
+        model: "late",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      };
+    },
+  );
+  assert.equal(result.report.timeoutPhase, "evaluation");
+  assert.equal(result.report.status, "fallback");
+  assert.equal(signal?.aborted, true);
+  assert.deepEqual(result.report.usage, { input_tokens: 1, output_tokens: 1 });
+});
 
 test("same-name skills keep distinct path IDs and tie sorting is stable", () => {
   const a = skill("same", "one");
@@ -167,6 +389,8 @@ test("configuration merges project scalars and unions relative pins; bad fields 
       JSON.stringify({
         minProbability: 0.8,
         model: "jev-project-override",
+        preparationTimeoutMs: 7000,
+        evaluationTimeoutMs: 8000,
         pinnedSkillPaths: ["../shared/SKILL.md", "./skills/x/SKILL.md"],
       }),
     );
@@ -175,6 +399,8 @@ test("configuration merges project scalars and unions relative pins; bad fields 
     assert.equal(loaded.config.minProbability, 0.8);
     assert.equal(loaded.config.maxAutoSkills, 2);
     assert.equal(loaded.config.model, "jev-project-override");
+    assert.equal(loaded.config.preparationTimeoutMs, 7000);
+    assert.equal(loaded.config.evaluationTimeoutMs, 8000);
     assert.deepEqual(loaded.config.pinnedSkillPaths, [
       join(root, "shared/SKILL.md"),
       join(root, ".pi/skills/x/SKILL.md"),
@@ -183,13 +409,23 @@ test("configuration merges project scalars and unions relative pins; bad fields 
       join(root, ".pi/skill-router.json"),
       JSON.stringify({
         routeTimeoutMs: -1,
+        preparationTimeoutMs: 0,
+        evaluationTimeoutMs: 2147483648,
         minProbability: 2,
         pinnedSkillPaths: ["./skills/x/SKILL.md", null],
         apiKey: "must-not-echo",
       }),
     );
     const invalid = loadConfig(root, agent);
-    assert.equal(invalid.issues.length, 4);
+    assert.equal(invalid.issues.length, 6);
+    assert.equal(
+      invalid.config.preparationTimeoutMs,
+      DEFAULT_CONFIG.preparationTimeoutMs,
+    );
+    assert.equal(
+      invalid.config.evaluationTimeoutMs,
+      DEFAULT_CONFIG.evaluationTimeoutMs,
+    );
     assert.equal(invalid.config.pinnedSkillPaths.length, 2);
     assert.equal(invalid.config.model, "jev-user-override");
     assert.doesNotMatch(invalid.issues.join(), /must-not-echo/);
@@ -318,6 +554,48 @@ test("official SDK never retries authentication, rate limit, oversized or servic
         !error.message.includes("private"),
     );
     assert.equal(calls, 1);
+  }
+});
+
+test("SDK token context rejection is reported precisely without forwarding arbitrary error data", async () => {
+  for (const errorType of ["max_tokens_exceeded", "secret-unknown-error"]) {
+    let calls = 0;
+    const result = await route(
+      {
+        catalog: [skill("one")],
+        pinned: [],
+        state,
+        config,
+        signal: undefined,
+        issues: [],
+      },
+      createJevEvaluator({
+        getApiKey: () => "test-only",
+        fetch: async () => {
+          calls++;
+          return Response.json(
+            {
+              detail: {
+                error_type: errorType,
+                message: "private-error-payload",
+              },
+            },
+            { status: 400 },
+          );
+        },
+      }),
+    );
+    assert.equal(calls, 1);
+    assert.equal(result.report.reason, "input_limit");
+    assert.equal(result.report.httpStatus, 400);
+    assert.equal(
+      result.report.serviceErrorType,
+      errorType === "max_tokens_exceeded" ? errorType : undefined,
+    );
+    assert.doesNotMatch(
+      JSON.stringify(result.report),
+      /private-error-payload|secret-unknown-error/,
+    );
   }
 });
 

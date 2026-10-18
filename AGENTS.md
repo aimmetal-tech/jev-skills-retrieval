@@ -17,10 +17,18 @@ to `~/.jev-skill-router/credentials.json`; never to project config or session da
 ## Structure and data flow
 
 - `src/pi-adapter.ts`: Pi lifecycle entry point and per-run structured skill catalog.
-- `src/selection.ts`: canonical local path identity, deduplication and pinned clones.
-- `src/router.ts`: one total routing deadline, cancellation and explicit fallback.
+- `src/selection.ts`: request-local canonical path identity cache and catalog
+  snapshot; deduplication, pinned clones and candidates are reused through routing
+  and fallback. Never reuse the snapshot across normal user requests.
+- `src/router.ts`: preparation/evaluation deadlines under a total safety deadline
+  (excluding credential waiting), stage timings, early cancellation and fallback.
+  After solution A reached Jev but the old 3s total expired, the user authorized
+  increasing/splitting limits: defaults are 5s preparation, 10s evaluation, 15s
+  total. Existing routeTimeoutMs overrides remain a total cap. Synchronous local
+  work is checked after completion, not forcibly preempted by JavaScript timers.
 - `src/jev-client.ts`: official SDK batch Noul requests, strict response validation,
-  sanitized failure codes, actual model version and token usage.
+  sanitized failure codes, allowlisted `max_tokens_exceeded` service detail,
+  actual model version and token usage. Never forward arbitrary server error data.
 - `src/context.ts`: raw current input, bounded visible conversation and prior metadata.
 - `src/credentials.ts`: environment-first credential resolution, blocking input,
   cached user-file fallback, explicit key editing/reset and shutdown cache cleanup.
@@ -65,6 +73,10 @@ to `~/.jev-skill-router/credentials.json`; never to project config or session da
   when configured, without direct fallback; no proxy URL/credentials in evidence.
   Per-provider budget wrappers count inference requests. Process-local fetch also
   routes native OAuth refresh consistently; it is not a global budget counter.
+  `diagnose-routing.ts` verifies the full 6,006-skill request-local snapshot offline
+  by default; `--live` sends at most one real Jev request, with no Pi generation.
+  It writes sanitized preparation/HTTP/timing evidence below
+  `outputs/benchmark/diagnostics/`; this is not a task accuracy benchmark.
 - `benchmark/blocked-inputs.json`: the user-reported antivirus quarantine of
   `fix-druid-loophole-cve/verifier/test_outputs.py` (ID A9E32DDD4DA1FF17).
   Static review of the official pinned file found real CVE-2021-25646 exploit
@@ -99,6 +111,11 @@ thinking, skill bodies and session custom entries are excluded. Session reload
 with existing messages is explicitly unsupported and skips routing. Diagnostics
 persist as `jev-skill-router` custom entries and `/skill-router-status` displays
 the latest report without raw task text or credentials.
+Catalog preparation produces a single request-local snapshot before the credential
+gate; its duration is passed to the router and consumes the same total deadline.
+Credential input/storage waiting does not consume that deadline. Reports include
+preparation, evaluator (SDK/network/parsing) and selection milliseconds; timeoutPhase
+distinguishes preparation/evaluation/total. No batching or prefiltering is added.
 `/jev-skill apikey` saves the same credential used by the blocking gate to the user
 file; `apikey reset` removes the file and cache. It takes no plaintext key argument.
 `/jev-skill baseurl [URL|reset]` updates only
@@ -122,7 +139,14 @@ conversation history. `/jev-skill status` displays source/presence, never key va
   remains environment-only; Pi headless mode can use a previously saved credential.
 - Generic LLM integrations, if introduced later, prefer `LLM_API_KEY`,
   `LLM_BASE_URL`, and OpenAI Chat Completions. V1 needs no generic LLM call.
-- Use the official TypeSafe JavaScript SDK. Zero retries and one total deadline.
+- Use the official TypeSafe JavaScript SDK. Zero retries; evaluator time is capped
+  by min(evaluationTimeoutMs, remaining routeTimeoutMs).
+- Live full-catalog diagnostics reached Jev and received HTTP 400 with
+  `detail.error_type=max_tokens_exceeded`. Official live docs confirm Jev 1.14
+  defaults to 64k per request and 32k for state plus any one question; there is no
+  separate question-count limit. The 262k long-context header is opt-in and has
+  documented speed/accuracy tradeoffs. It has not been enabled; batching and
+  prefiltering remain separate unimplemented designs, not part of solution A.
 - Jev Base URL precedence: project `baseUrl` > user `baseUrl` >
   `TYPESAFE_BASE_URL` > `https://api.typesafe.ai`. Pass it as SDK `baseURL`;
   the SDK appends `/v1/systemone`. This is a Jev API root, not a proxy setting.

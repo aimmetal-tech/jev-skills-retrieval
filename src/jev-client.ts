@@ -24,6 +24,7 @@ export class RoutingFailure extends Error {
     readonly code: FailureCode,
     message: string,
     readonly httpStatus?: number,
+    readonly serviceErrorType?: "max_tokens_exceeded",
   ) {
     super(message);
   }
@@ -153,6 +154,18 @@ export function createJevEvaluator(
       if (error instanceof APITimeoutError)
         throw new RoutingFailure("timeout", "Jev request timed out.");
       if (error instanceof APIError) {
+        if (
+          error.status === 400 &&
+          object(error.body) &&
+          object(error.body.detail) &&
+          error.body.detail.error_type === "max_tokens_exceeded"
+        )
+          throw new RoutingFailure(
+            "input_limit",
+            "Jev request exceeds the model token context (HTTP 400; max_tokens_exceeded).",
+            400,
+            "max_tokens_exceeded",
+          );
         if (error.status === 401 || error.status === 403)
           throw new RoutingFailure(
             "authentication",

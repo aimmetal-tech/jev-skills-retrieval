@@ -210,3 +210,50 @@ npm run eval
 
 复现和预算/续跑/报告命令见 [benchmark/README.md](../benchmark/README.md)。
 原始官方任务、依赖环境、包与图表全部留在忽略的 outputs 下，不进入提交。
+
+## 方案 A 与分段超时（2026-10-18，后续实测）
+
+用户已授权真实调用，并纠正执行模型为 Pi 已登录的 `(openai) gpt-6-luna`、
+OAuth、medium。原生账户工具预检成功，首轮真实 SkillRet 运行已产生模型 usage。
+该运行因连续路由超时被停止，不能当作完整 benchmark 或插件提升证据。
+此前关于模型不可用、预算待定、src 未变的描述是初始准备阶段记录。
+
+本轮按用户要求实施方案 A：单次请求的规范路径身份、去重目录、固定项、候选和
+成功/失败合并共享快照；每个新请求重新生成，不跨请求缓存，也不预筛选或分批。
+取消先于本地解析检查，空固定项不构造路径索引。
+
+- 原始代码离线诊断：完整 6,006 项共访问真实路径 54,054 次，本地流程约 14.21 秒，
+  未进入 evaluator。证据：`outputs/benchmark/diagnostics/local-routing/profile.json`。
+- 修复后离线诊断：真实路径访问 6,006 次，完整本地流程约 1.95 秒，进入无网络夹具。
+  证据：`outputs/benchmark/diagnostics/solution-a-offline/result.json`。
+  两次是单次开发诊断，不能作为统计性能或正确率结论。
+- 保持 3 秒总上限的真实诊断：已发出 1 次 Jev HTTP 请求，本地准备约 1.26 秒，
+  剩余评估约 1.75 秒耗尽，触发 timeout。证据：`solution-a-live-3s/result.json`。
+- 放宽到 15 秒后：一次 HTTP 请求返回 **400**，约 4.82 秒结束；不再是超时。
+  新默认为准备 5 秒、评估 10 秒、总上限 15 秒；旧 `routeTimeoutMs` 仍为总上限。
+  分段默认验证约 6.40 秒返回 400，原因由现有分类器记为 `input_limit`。
+  证据：`solution-a-live-15s/result.json`、`solution-a-split-defaults/result.json`。
+- 后续检查仅 47 字节的拒绝说明，明确返回 `detail.error_type=max_tokens_exceeded`。
+  早期摘要器漏读 `error_type`，因此其 `unclassified` 不表示服务未给出原因。
+  已在正式 SDK 错误处理白名单中保留该错误码，不转发任意服务器错误字段。
+  证据：`http-400-inspection/result.json` 及同次操作的脱敏控制台说明；
+  额外核验记录为 `http-400-confirmed.json`，未保存原始错误正文。
+- 用户指定的本地 TypeSafe Skill 要求读取实时文档，已通过官方
+  [API 错误表](https://docs.typesafe.ai/api#errors) 及
+  [模型限制](https://docs.typesafe.ai/models#context-length) 核实：Jev 1.14 默认
+  每请求 64k、state 加任一问题 32k Token；没有独立问题数量上限。
+  可用专用长上下文请求头将两者扩到 262k，但官方说明更慢且准确率较低。
+  该头未启用。分批/预筛选也未实施，以免改变已确认的单批全候选设计。
+- 数据统计：技能名称/描述共 1,416,271 字符，重复判断说明共 1,189,188 字符；
+  第一条查询 734 字符，最长技能描述 2,472 字符。
+  字符数不是实际 Token 数；不能由此声称精确 Token 用量或长上下文一定足够。
+- 本轮总计 6 次真实 Jev 请求，无 Pi 聊天生成；失败调用 Token/费用未知。
+  正式全量任务没有重启，不能据此给出检索正确率、任务成功率或 Token 提升。
+- `npm run check`：71 项测试、TypeScript、Biome 和构建通过；
+  `npm run verify:package`：37 文件的包由真正的 Pi 1.3.0 加载成功。
+  新回归覆盖 6,006 路径只解析一次、路径别名/固定克隆、跨请求路径变更、
+  三种超时归因、同步 SDK 超限、取消、已知失败 usage 保留，以及 SDK 服务错误白名单。
+
+复现：`npx tsx benchmark/diagnose-routing.ts --output diagnostics/new-local`；
+加 `--live` 最多调用一次真实 Jev，不启动 Pi 模型。超时参数见 benchmark/README.md。
+所有相对证据路径以 `outputs/benchmark/diagnostics/` 为根目录。

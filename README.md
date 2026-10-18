@@ -105,7 +105,9 @@ Base URL 是 Jev 服务地址；它不会配置系统 HTTP 代理。
   "autoMetadataMaxChars": 4000,
   "pinnedSkillPaths": ["./skills/my-skill/SKILL.md"],
   "minProbability": 0.65,
-  "routeTimeoutMs": 3000,
+  "routeTimeoutMs": 15000,
+  "preparationTimeoutMs": 5000,
+  "evaluationTimeoutMs": 10000,
   "model": "jev-1.14.0",
   "baseUrl": "https://api.typesafe.ai"
 }
@@ -136,12 +138,21 @@ Pi 会话的 `jev-skill-router` 自定义条目
 - 缺 key：等待用户填写并保存；取消、无 UI、弹窗或落盘错误时记录 `blocked/missing_key`，
   取消当前任务，绝不把全目录交给聊天模型继续。无自动候选、自动预算为 0
   或配置校验已失败时，不进入 Jev 凭据填写流程。CLI 的 `eval --live` 缺 key
-  仍直接报错退出。等待人输入的时间不计入 3 秒网络 deadline。
+  仍直接报错退出。等待人输入及凭据存储的时间不计入路由 deadline。
 - 已提供 key 后的鉴权失败、限流、服务错误、输入拒绝、无效响应、超时：回退原始
   catalog 并保留有效固定项；不把故障假装成零命中。
+  若服务明确返回 `max_tokens_exceeded`，诊断记录该白名单错误码，表示模型上下文
+  Token 超限；不再只显示笼统的 HTTP 400，也不会转发任意服务错误正文。
 - 配置无效或固定路径无效：列出具体字段/路径，保留其余有效固定项并回退，
   本轮不调用 Jev。未知配置字段也会报告；配置中不允许放 key。
-- 一次总 deadline 覆盖 SDK、网络和响应解析，并传递共享 abort signal；
+- 每个请求只解析一次各路径的规范身份，复用去重目录、固定项和候选；
+  成功合并及失败回退复用同一快照。下一次用户请求重新解析，避免缓存路径变更。
+- 一次总 deadline 覆盖本地目录准备、SDK、网络和响应解析，并传递共享 abort signal；
+  凭据等待不计时。诊断另列 preparation/evaluation/selection 分段耗时。
+  默认本地准备上限 5 秒、Jev 评估上限 10 秒、总上限 15 秒；保留 `routeTimeoutMs`
+  作为总上限，旧配置仍会生效。评估包含 SDK 构造、网络、响应解析与校验。
+  本地同步文件调用不能由 JS 定时器强行中断，完成后检查上限，超限不发 Jev 请求。
+  `timeoutPhase` 指出触发的是 preparation、evaluation 或 total。
   SDK 重试固定为 0。超大目录目前不分批，服务拒绝时明确降级。
 - 取消沿用 Pi 语义，不重启工作。Pi 1.3.0 在 `before_agent_start` 阶段可能
   没有暴露操作 signal，因此启动时取消可能等待本次路由 deadline；真实

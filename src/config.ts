@@ -12,6 +12,8 @@ export interface RouterConfig {
   pinnedSkillPaths: string[];
   minProbability: number;
   routeTimeoutMs: number;
+  preparationTimeoutMs: number;
+  evaluationTimeoutMs: number;
   model?: string;
   baseUrl?: string;
 }
@@ -23,7 +25,9 @@ export const DEFAULT_CONFIG: Readonly<RouterConfig> = Object.freeze({
   autoMetadataMaxChars: 4000,
   pinnedSkillPaths: [],
   minProbability: 0.65,
-  routeTimeoutMs: 3000,
+  routeTimeoutMs: 15000,
+  preparationTimeoutMs: 5000,
+  evaluationTimeoutMs: 10000,
   model: "jev-1.14.0",
 });
 
@@ -38,6 +42,8 @@ const integerKeys = new Set([
   "maxAutoSkills",
   "autoMetadataMaxChars",
   "routeTimeoutMs",
+  "preparationTimeoutMs",
+  "evaluationTimeoutMs",
 ]);
 
 export function loadConfig(cwd: string, agentDir: string): LoadedConfig {
@@ -69,12 +75,13 @@ export function loadConfig(cwd: string, agentDir: string): LoadedConfig {
     for (const [key, item] of Object.entries(value)) {
       const invalid = () => issues.push(`Invalid ${key} in ${file}`);
       if (integerKeys.has(key)) {
-        const minimum = key === "routeTimeoutMs" ? 1 : 0;
+        const isTimeout = key.endsWith("TimeoutMs");
+        const minimum = isTimeout ? 1 : 0;
         if (
           typeof item !== "number" ||
           !Number.isSafeInteger(item) ||
           item < minimum ||
-          (key === "routeTimeoutMs" && item > 2147483647)
+          (isTimeout && item > 2147483647)
         )
           invalid();
         else Object.assign(config, { [key]: item });

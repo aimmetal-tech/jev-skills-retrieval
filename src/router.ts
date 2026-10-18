@@ -7,14 +7,25 @@ import {
   type FailureCode,
   RoutingFailure,
 } from "./jev-client.ts";
-import { autoCandidates, selectAutomatic, uniqueSkills } from "./selection.ts";
+import {
+  type CatalogSnapshot,
+  prepareCatalog,
+  selectAutomatic,
+} from "./selection.ts";
 
 export interface RouteReport {
   status: "selected" | "fallback" | "cancelled" | "blocked";
   reason?: FailureCode;
   message?: string;
   httpStatus?: number;
+  serviceErrorType?: RoutingFailure["serviceErrorType"];
+  timeoutPhase?: "preparation" | "evaluation" | "total";
   elapsedMs: number;
+  timings?: {
+    preparationMs: number;
+    evaluationMs: number;
+    selectionMs: number;
+  };
   candidateCount: number;
   selectedCount: number;
   model?: string;
@@ -32,6 +43,9 @@ export interface RouteRequest {
   signal: AbortSignal | undefined;
   issues: readonly string[];
   fileReadTool?: "read" | "bash" | "indirect";
+  prepared?: CatalogSnapshot;
+  /** Local preparation only; credential input/crypto waiting is excluded. */
+  preparationMs?: number;
 }
 
 export async function route(
@@ -39,10 +53,33 @@ export async function route(
   evaluate: Evaluator,
 ): Promise<RouteResult> {
   const started = performance.now();
-  const candidates = autoCandidates(request.catalog, request.pinned);
+  const priorPreparationMs = request.preparationMs ?? 0;
+  // Check cancellation before touching the filesystem, including direct route callers.
+  if (request.signal?.aborted)
+    return {
+      skills: [...request.pinned],
+      report: {
+        status: "cancelled",
+        elapsedMs: priorPreparationMs,
+        candidateCount: request.prepared?.candidates.length ?? 0,
+        selectedCount: request.pinned.length,
+      },
+    };
+  const prepared =
+    request.prepared ??
+    prepareCatalog(request.catalog, { pinned: request.pinned });
+  const { candidates } = prepared;
+  const timings = {
+    preparationMs: priorPreparationMs + performance.now() - started,
+    evaluationMs: 0,
+    selectionMs: 0,
+  };
+  const elapsed = () => priorPreparationMs + performance.now() - started;
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   let onAbort: (() => void) | undefined;
+  let timeoutPhase: RouteReport["timeoutPhase"];
+  let observedResult: EvaluationResult | undefined;
   const report = (
     status: RouteReport["status"],
     skills: Skill[],
@@ -51,7 +88,8 @@ export async function route(
     skills,
     report: {
       status,
-      elapsedMs: performance.now() - started,
+      elapsedMs: elapsed(),
+      timings: { ...timings },
       candidateCount: candidates.length,
       selectedCount: skills.length,
       ...extra,
@@ -68,20 +106,35 @@ export async function route(
       request.config.autoMetadataMaxChars === 0
     )
       return report("selected", [...request.pinned]);
-    const remainingMs =
-      request.config.routeTimeoutMs - (performance.now() - started);
-    const timeoutFailure = () =>
-      new RoutingFailure(
+    const timeoutFailure = (
+      phase: NonNullable<RouteReport["timeoutPhase"]>,
+    ) => {
+      timeoutPhase = phase;
+      controller.abort();
+      return new RoutingFailure(
         "timeout",
-        `Routing exceeded the ${request.config.routeTimeoutMs} ms total deadline.`,
+        phase === "total"
+          ? `Routing exceeded the ${request.config.routeTimeoutMs} ms total deadline.`
+          : `Routing exceeded the ${request.config[phase === "preparation" ? "preparationTimeoutMs" : "evaluationTimeoutMs"]} ms ${phase} deadline.`,
       );
-    if (remainingMs <= 0) throw timeoutFailure();
-    // Cover construction, transport, body parsing and validation with one deadline.
+    };
+    // Synchronous filesystem work cannot be preempted by a timer. Check it before
+    // any remote work and retain the independent total safety deadline.
+    if (timings.preparationMs >= request.config.preparationTimeoutMs)
+      throw timeoutFailure("preparation");
+    const remainingMs = request.config.routeTimeoutMs - elapsed();
+    if (remainingMs <= 0) throw timeoutFailure("total");
+    const evaluationMs = Math.min(
+      remainingMs,
+      request.config.evaluationTimeoutMs,
+    );
+    const deadlinePhase = evaluationMs < remainingMs ? "evaluation" : "total";
+    // SDK construction, transport, body parsing and validation share this cap.
     const deadline = new Promise<never>((_resolve, reject) => {
       timer = setTimeout(() => {
         controller.abort();
-        reject(timeoutFailure());
-      }, remainingMs);
+        reject(timeoutFailure(deadlinePhase));
+      }, evaluationMs);
       onAbort = () => {
         controller.abort();
         reject(new Error("cancelled"));
@@ -89,27 +142,41 @@ export async function route(
       request.signal?.addEventListener("abort", onAbort, { once: true });
       if (request.signal?.aborted) onAbort();
     });
-    const result = await Promise.race([
-      deadline,
-      evaluate({
-        state: request.state,
-        candidates,
-        signal: controller.signal,
-        timeoutMs: Math.max(1, Math.floor(remainingMs)),
-        ...(request.config.model ? { model: request.config.model } : {}),
-        ...(request.config.baseUrl ? { baseUrl: request.config.baseUrl } : {}),
-      }),
-    ]);
+    const evaluationStarted = performance.now();
+    let result: EvaluationResult;
+    try {
+      result = await Promise.race([
+        deadline,
+        evaluate({
+          state: request.state,
+          candidates,
+          signal: controller.signal,
+          timeoutMs: Math.max(1, Math.floor(evaluationMs)),
+          ...(request.config.model ? { model: request.config.model } : {}),
+          ...(request.config.baseUrl
+            ? { baseUrl: request.config.baseUrl }
+            : {}),
+        }),
+      ]);
+      observedResult = result;
+    } finally {
+      timings.evaluationMs = performance.now() - evaluationStarted;
+    }
     if (request.signal?.aborted) return cancelled();
+    if (timings.evaluationMs >= evaluationMs)
+      throw timeoutFailure(deadlinePhase);
+    const selectionStarted = performance.now();
     const automatic = selectAutomatic(
       candidates,
       result.probabilities,
       request.config,
       request.fileReadTool,
     );
-    if (performance.now() - started >= request.config.routeTimeoutMs)
-      throw timeoutFailure();
-    return report("selected", uniqueSkills([...request.pinned, ...automatic]), {
+    const selected = prepared.merge([...prepared.pinned, ...automatic]);
+    timings.selectionMs = performance.now() - selectionStarted;
+    if (elapsed() >= request.config.routeTimeoutMs)
+      throw timeoutFailure("total");
+    return report("selected", selected, {
       model: result.model,
       usage: result.usage,
     });
@@ -121,10 +188,19 @@ export async function route(
         : new RoutingFailure("service_error", "Unexpected routing failure.");
     return report(
       "fallback",
-      uniqueSkills([...request.pinned, ...request.catalog]),
+      prepared.merge([...prepared.pinned, ...prepared.catalog]),
       {
         reason: failure.code,
         message: failure.message,
+        ...(failure.serviceErrorType
+          ? { serviceErrorType: failure.serviceErrorType }
+          : {}),
+        ...(observedResult
+          ? { model: observedResult.model, usage: observedResult.usage }
+          : {}),
+        ...(failure.code === "timeout"
+          ? { timeoutPhase: timeoutPhase ?? "evaluation" }
+          : {}),
         ...(failure.httpStatus === undefined
           ? {}
           : { httpStatus: failure.httpStatus }),

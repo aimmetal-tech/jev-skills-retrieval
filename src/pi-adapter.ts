@@ -13,7 +13,7 @@ import type { CredentialStore } from "./credential-store.ts";
 import { JevCredentials } from "./credentials.ts";
 import { createJevEvaluator, type Evaluator } from "./jev-client.ts";
 import { type RouteReport, route } from "./router.ts";
-import { autoCandidates, pinnedSkills, uniqueSkills } from "./selection.ts";
+import { prepareCatalog } from "./selection.ts";
 
 export interface AdapterDependencies {
   evaluate?: Evaluator;
@@ -106,11 +106,15 @@ export function createSkillRouterExtension(
         ctx.ui.notify(message, "warning");
         return;
       }
-      const catalog = uniqueSkills(event.systemPromptOptions.skills);
+      if (ctx.signal?.aborted) return;
+      const preparationStarted = performance.now();
       const loaded = configuration(ctx.cwd);
       historyLimit = loaded.config.historyMaxTurns;
-      const pinned = pinnedSkills(catalog, loaded.config.pinnedSkillPaths);
-      const issues = [...loaded.issues, ...pinned.issues];
+      const prepared = prepareCatalog(event.systemPromptOptions.skills, {
+        pinnedPaths: loaded.config.pinnedSkillPaths,
+      });
+      const { catalog, pinned, candidates } = prepared;
+      const issues = [...loaded.issues, ...prepared.issues];
       const tools = event.systemPromptOptions.selectedTools;
       const hidden = event.systemPromptOptions.hiddenTools;
       const reader =
@@ -122,8 +126,16 @@ export function createSkillRouterExtension(
               ? "indirect"
               : undefined;
       // Fixed baseline is written before remote work. Errors explicitly restore the catalog.
-      event.systemPromptOptions.skills = pinned.skills;
-      const candidateCount = autoCandidates(catalog, pinned.skills).length;
+      event.systemPromptOptions.skills = pinned;
+      const state = buildRoutingState(
+        inputText,
+        history,
+        previous,
+        loaded.config,
+        earlierHistoryOmitted,
+      );
+      const preparationMs = performance.now() - preparationStarted;
+      const candidateCount = candidates.length;
       if (
         !issues.length &&
         candidateCount > 0 &&
@@ -146,9 +158,9 @@ export function createSkillRouterExtension(
             status: "blocked",
             reason: "missing_key",
             message,
-            elapsedMs: 0,
+            elapsedMs: preparationMs,
             candidateCount,
-            selectedCount: pinned.skills.length,
+            selectedCount: pinned.length,
           });
           return;
         }
@@ -156,14 +168,10 @@ export function createSkillRouterExtension(
       const result = await route(
         {
           catalog,
-          pinned: pinned.skills,
-          state: buildRoutingState(
-            inputText,
-            history,
-            previous,
-            loaded.config,
-            earlierHistoryOmitted,
-          ),
+          pinned,
+          prepared,
+          preparationMs,
+          state,
           config: loaded.config,
           signal: ctx.signal,
           issues,
@@ -175,7 +183,7 @@ export function createSkillRouterExtension(
       if (result.report.reason === "missing_key") {
         blockForMissingKey(ctx, {
           ...result.report,
-          selectedCount: pinned.skills.length,
+          selectedCount: pinned.length,
           message: "Jev API key 已不可用；本次任务已停止，未发送模型请求。",
         });
         return;

@@ -1,8 +1,15 @@
 # Pi 全量 Skills benchmark
 
 本目录启动真实 `@earendil-works/pi-coding-agent@1.3.0`，比较 **Pi 原生 Skills** 与
-**同一 Pi 加载本插件**。插件源码和默认配置保持不变：`jev-1.14.0`、3 秒路由截止时间、
-最多选 5 个技能、选中元数据最多 4,000 字符。无重试、预筛选、分批或测试中调参。
+**同一 Pi 加载本插件**。首轮固定配置：`jev-1.14.0`、3 秒路由截止时间、
+最多选 5 个技能、选中元数据最多 4,000 字符。无重试、预筛选或分批。
+用户随后授权方案 A：请求内复用路径身份、目录及候选，并在测试后按需调整超时。
+3 秒实测仍超时；新默认分为本地准备 5 秒、评估 10 秒、总上限 15 秒。
+完整目录已到达 Jev 并返回 HTTP 400；延长超时不能解决该输入拒绝。
+随后核实服务错误码为 `max_tokens_exceeded`。Jev 1.14 默认整次请求 64k Token，
+共享 state 加单个问题 32k Token；没有独立问题数量限制。
+官方 262k 长上下文模式有速度/准确率影响，当前未开启，也尚未实现分批或预筛选。
+修复后的测试使用新运行目录；不得与修复前的运行合并为同一被测版本。
 
 当前交付包含数据准备、离线验证及运行/报告工具。用户已授权开始真实测试，
 并明确指定 Pi 的 OpenAI OAuth 账户、`gpt-6-luna` 和 **medium**。
@@ -130,6 +137,15 @@ npm run benchmark -- --report --output runs/full-001
 
 ## 输出与文件职责
 
+`npx tsx benchmark/diagnose-routing.ts --output diagnostics/local-a` 使用完整 SkillRet
+目录验证方案 A，本身不联网。加 `--live` 后最多发送一次 Jev 请求，不调用 Pi 聊天模型。
+`--timeout-ms 3000` 可显式覆盖总上限；`--preparation-timeout-ms` 和
+`--evaluation-timeout-ms` 可覆盖分段上限。输出保存路径解析次数、候选摘要、分段耗时和 HTTP
+状态，不保存查询原文、凭据、请求或响应正文。失败调用的 Token 可能未知。
+服务的 `max_tokens_exceeded` 通过白名单从 SDK 错误体提取到路由报告；其他任意错误正文
+仍不进入证据。限制依据见 [官方模型说明](https://docs.typesafe.ai/models#context-length)。
+这些诊断结果与正式检索/任务完成率报告分开。
+
 `outputs/benchmark/data/` 保存固定数据、映射及 manifest；`.venv/` 为隔离 Python 依赖，
 `preview/` 是空结果/预检报告，`verification/` 是 MOCK 证据，`runs/<id>/` 是将来的真实结果。
 每个报告包含 `run.json`、`results.jsonl`、`results.csv`、`summary.json`、
@@ -138,4 +154,5 @@ npm run benchmark -- --report --output runs/full-001
 代码：`prepare.py` 下载与输入审计；`data.ts` 验证/原生技能发现；`run.ts` 调度/预算门禁；
 `pi.ts` 固定 Pi 会话与观测；`remote.ts`、`task-worker.ts`、`skillsbench.py` 负责容器桥接；
 `benchflow_compat.py` 为已验证的 Windows 容器路径修正；`metrics.ts` 与 `report.py` 计算和绘图；
-`selftest.ts` 验证无害 Docker 夹具。来源锁、依赖锁与安全阻断清单在本目录。
+`selftest.ts` 验证无害 Docker 夹具；`diagnose-routing.ts` 诊断完整目录路由耗时。
+来源锁、依赖锁与安全阻断清单在本目录。
