@@ -5,6 +5,7 @@ import {
   getAgentDir,
   type Skill,
 } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import type { Fetch } from "@typesafe-ai/sdk";
 import type { BatchAttempt } from "./batching.ts";
 import { registerJevSkillCommand } from "./commands.ts";
@@ -13,6 +14,11 @@ import { buildRoutingState, type ConversationTurn } from "./context.ts";
 import type { CredentialStore } from "./credential-store.ts";
 import { JevCredentials } from "./credentials.ts";
 import { createJevEvaluator, type Evaluator } from "./jev-client.ts";
+import {
+  formatSkillPromptStatus,
+  type SkillPromptStatus,
+  verifySkillPrompt,
+} from "./prompt-status.ts";
 import { type RouteReport, route } from "./router.ts";
 import { prepareCatalog } from "./selection.ts";
 
@@ -53,6 +59,27 @@ export function createSkillRouterExtension(
     let conflictReported = false;
     let unsupportedSession = false;
     let lastReport: RouteReport | undefined;
+    let promptStatus: SkillPromptStatus = {
+      mode: "waiting",
+      verification: "not_sent",
+    };
+    let lastPromptNotice: string | undefined;
+    const showPromptStatus = (ctx: ExtensionContext) => {
+      ctx.ui.setStatus(
+        "jev-skill-router",
+        formatSkillPromptStatus(promptStatus),
+      );
+      ctx.ui.setWidget(
+        "jev-skills-retrieval",
+        () =>
+          new Text(
+            `[jev-skills-retrieval]\n${formatSkillPromptStatus(promptStatus)}`,
+            0,
+            0,
+          ),
+        { placement: "aboveEditor" },
+      );
+    };
     const configuration =
       dependencies.configuration ??
       ((cwd: string) => loadConfig(cwd, getAgentDir()));
@@ -60,12 +87,19 @@ export function createSkillRouterExtension(
       credentials,
       configuration,
       getReport: () => lastReport,
+      getPromptStatus: () => promptStatus,
     });
     const blockForMissingKey = (ctx: ExtensionContext, report: RouteReport) => {
       lastReport = { ...report, status: "blocked", reason: "missing_key" };
       dependencies.onReport?.(lastReport);
       pi.appendEntry("jev-skill-router", lastReport);
-      ctx.ui.setStatus("jev-skill-router", "Skills: blocked · missing_key");
+      promptStatus = {
+        ...promptStatus,
+        mode: "blocked",
+        verification: "not_sent",
+        reason: "missing_key",
+      };
+      showPromptStatus(ctx);
       const message =
         lastReport.message ?? "Jev 缺少 API key；本次任务已停止。";
       dependencies.onDiagnostic?.(message);
@@ -80,6 +114,7 @@ export function createSkillRouterExtension(
       current = undefined;
       expectedMetadata = undefined;
       lastReport = undefined;
+      lastPromptNotice = undefined;
       unsupportedSession = ctx.sessionManager
         .getBranch()
         .some(
@@ -87,6 +122,14 @@ export function createSkillRouterExtension(
             entry.type === "message" &&
             ["user", "assistant"].includes(entry.message.role),
         );
+      promptStatus = unsupportedSession
+        ? {
+            mode: "unrouted",
+            verification: "not_sent",
+            reason: "existing_session",
+          }
+        : { mode: "waiting", verification: "not_sent" };
+      showPromptStatus(ctx);
     });
     pi.on("input", (event, ctx) => {
       if (event.streamingBehavior) {
@@ -98,28 +141,8 @@ export function createSkillRouterExtension(
     });
     pi.on("session_shutdown", () => credentials.clear());
     pi.on("before_agent_start", async (event, ctx) => {
-      if (event.messageType !== "user") return;
-      const inputText = rawText;
-      rawText = undefined;
-      expectedMetadata = undefined;
-      conflictReported = false;
-      if (unsupportedSession || inputText === undefined) {
-        const message =
-          "Skill router v1 requires a fresh session and normal raw user input; using the original catalog.";
-        dependencies.onDiagnostic?.(message);
-        ctx.ui.notify(message, "warning");
-        return;
-      }
-      if (ctx.signal?.aborted) return;
-      dependencies.onRouteStart?.();
-      const preparationStarted = performance.now();
-      const loaded = configuration(ctx.cwd);
-      historyLimit = loaded.config.historyMaxTurns;
-      const prepared = prepareCatalog(event.systemPromptOptions.skills, {
-        pinnedPaths: loaded.config.pinnedSkillPaths,
-      });
-      const { catalog, pinned, candidates } = prepared;
-      const issues = [...loaded.issues, ...prepared.issues];
+      lastPromptNotice = undefined;
+      const skills = event.systemPromptOptions.skills;
       const tools = event.systemPromptOptions.selectedTools;
       const hidden = event.systemPromptOptions.hiddenTools;
       const reader =
@@ -130,6 +153,71 @@ export function createSkillRouterExtension(
             : tools.includes("read") || tools.includes("bash")
               ? "indirect"
               : undefined;
+      const metadata = (items: readonly Skill[]) =>
+        reader ? formatSkillsForPrompt([...items], reader).trim() : "";
+      expectedMetadata = undefined;
+      conflictReported = false;
+      promptStatus = {
+        mode: "unrouted",
+        verification: "pending",
+        catalogCount: skills.length,
+        plannedCount: reader
+          ? skills.filter((skill) => !skill.disableModelInvocation).length
+          : 0,
+        reason:
+          event.messageType !== "user"
+            ? "custom_turn"
+            : unsupportedSession
+              ? "existing_session"
+              : "missing_input",
+      };
+      if (event.messageType !== "user") {
+        expectedMetadata = metadata(skills);
+        showPromptStatus(ctx);
+        return;
+      }
+      const inputText = rawText;
+      rawText = undefined;
+      if (unsupportedSession || inputText === undefined) {
+        expectedMetadata = metadata(skills);
+        const message =
+          "Skill router v1 requires a fresh session and normal raw user input; using the original catalog.";
+        dependencies.onDiagnostic?.(message);
+        ctx.ui.notify(message, "warning");
+        showPromptStatus(ctx);
+        return;
+      }
+      if (ctx.signal?.aborted) {
+        promptStatus = {
+          mode: "blocked",
+          verification: "not_sent",
+          reason: "cancelled",
+        };
+        showPromptStatus(ctx);
+        return;
+      }
+      promptStatus = {
+        mode: "routing",
+        verification: "not_sent",
+        phase: "preparing",
+      };
+      showPromptStatus(ctx);
+      dependencies.onRouteStart?.();
+      const preparationStarted = performance.now();
+      const loaded = configuration(ctx.cwd);
+      historyLimit = loaded.config.historyMaxTurns;
+      const prepared = prepareCatalog(event.systemPromptOptions.skills, {
+        pinnedPaths: loaded.config.pinnedSkillPaths,
+      });
+      const { catalog, pinned, candidates } = prepared;
+      promptStatus = {
+        mode: "routing",
+        verification: "not_sent",
+        catalogCount: catalog.length,
+        phase: "preparing",
+      };
+      showPromptStatus(ctx);
+      const issues = [...loaded.issues, ...prepared.issues];
       // Fixed baseline is written before remote work. Errors explicitly restore the catalog.
       event.systemPromptOptions.skills = pinned;
       const state = buildRoutingState(
@@ -149,6 +237,10 @@ export function createSkillRouterExtension(
       ) {
         // Human input is awaited before the network deadline begins. Missing credentials
         // must never fall through to an un-routed model request.
+        if (!credentials.getApiKey()) {
+          promptStatus = { ...promptStatus, phase: "credentials" };
+          showPromptStatus(ctx);
+        }
         const credential = await credentials.ensure(ctx);
         if (credential.status !== "ready") {
           const message =
@@ -169,6 +261,16 @@ export function createSkillRouterExtension(
           });
           return;
         }
+        promptStatus = {
+          ...promptStatus,
+          phase: "evaluating",
+          completedBatches: 0,
+        };
+        showPromptStatus(ctx);
+        ctx.ui.notify(
+          `[jev-skills-retrieval] 已启动 · 正在为本次请求评分 ${candidateCount} 个候选技能。`,
+          "info",
+        );
       }
       const result = await route(
         {
@@ -180,14 +282,30 @@ export function createSkillRouterExtension(
           config: loaded.config,
           signal: ctx.signal,
           issues,
-          ...(dependencies.onAttempt
-            ? { onAttempt: dependencies.onAttempt }
-            : {}),
+          onAttempt: (attempt) => {
+            dependencies.onAttempt?.(attempt);
+            if (attempt.status === "completed") {
+              promptStatus = {
+                ...promptStatus,
+                completedBatches: (promptStatus.completedBatches ?? 0) + 1,
+              };
+              showPromptStatus(ctx);
+            }
+          },
           ...(reader ? { fileReadTool: reader } : {}),
         },
         evaluate,
       );
-      if (ctx.signal?.aborted || result.report.status === "cancelled") return;
+      if (ctx.signal?.aborted || result.report.status === "cancelled") {
+        promptStatus = {
+          ...promptStatus,
+          mode: "blocked",
+          verification: "not_sent",
+          reason: "cancelled",
+        };
+        showPromptStatus(ctx);
+        return;
+      }
       if (result.report.reason === "missing_key") {
         blockForMissingKey(ctx, {
           ...result.report,
@@ -199,30 +317,64 @@ export function createSkillRouterExtension(
       event.systemPromptOptions.skills = result.skills;
       previous = result.skills;
       current = { user: inputText, assistant: "" };
-      expectedMetadata = reader
-        ? formatSkillsForPrompt(result.skills, reader).trim()
-        : undefined;
+      expectedMetadata = metadata(result.skills);
+      const disabled =
+        loaded.config.maxAutoSkills === 0 ||
+        loaded.config.autoMetadataMaxChars === 0;
+      promptStatus = {
+        mode:
+          result.report.status === "fallback"
+            ? "fallback"
+            : disabled || !candidates.length
+              ? "fixed_only"
+              : "filtered",
+        verification: "pending",
+        catalogCount: catalog.length,
+        plannedCount: reader
+          ? result.skills.filter((skill) => !skill.disableModelInvocation)
+              .length
+          : 0,
+        ...(result.report.status !== "fallback" &&
+        (disabled || !candidates.length)
+          ? {
+              reason: disabled
+                ? ("disabled" as const)
+                : ("no_candidates" as const),
+            }
+          : {}),
+      };
       lastReport = result.report;
       dependencies.onReport?.(lastReport);
       pi.appendEntry("jev-skill-router", lastReport);
-      ctx.ui.setStatus(
-        "jev-skill-router",
-        `Skills: ${result.skills.length} · ${lastReport.status}${lastReport.model ? ` · ${lastReport.model}` : ""}`,
-      );
+      showPromptStatus(ctx);
       if (lastReport.status === "fallback") {
         const message = `Skill router fallback [${lastReport.reason}]: ${lastReport.message} Using the original catalog and valid pinned skills.`;
         dependencies.onDiagnostic?.(message);
         ctx.ui.notify(message, "warning");
       }
     });
-    pi.on("before_provider_request", (_event, ctx) => {
-      if (expectedMetadata === undefined || conflictReported) return;
-      const prompt = ctx.getSystemPrompt();
-      if (
-        expectedMetadata
-          ? !prompt.includes(expectedMetadata)
-          : prompt.includes("<available_skills>")
-      ) {
+    pi.on("before_provider_request", (event, ctx) => {
+      // Other extensions may change the prompt after routing; inspect the provider fields.
+      promptStatus = verifySkillPrompt(
+        promptStatus,
+        event.payload,
+        expectedMetadata,
+      );
+      showPromptStatus(ctx);
+      const summary = formatSkillPromptStatus(promptStatus);
+      if (summary !== lastPromptNotice) {
+        lastPromptNotice = summary;
+        pi.appendEntry("jev-skill-prompt", promptStatus);
+        ctx.ui.notify(
+          summary,
+          promptStatus.verification === "mismatch" ||
+            promptStatus.mode === "fallback" ||
+            promptStatus.mode === "unrouted"
+            ? "warning"
+            : "info",
+        );
+      }
+      if (promptStatus.verification === "mismatch" && !conflictReported) {
         conflictReported = true;
         const message =
           "Skill router conflict: another extension or forced systemPrompt changed the routed skill metadata. Check extension order and prompt overrides.";
@@ -249,9 +401,12 @@ export function createSkillRouterExtension(
         "Show the latest Jev skill-routing diagnostic (no prompt or key)",
       handler: async (_args, ctx) => {
         ctx.ui.notify(
-          lastReport
-            ? JSON.stringify(lastReport, null, 2)
-            : "No routing result in this session.",
+          [
+            formatSkillPromptStatus(promptStatus),
+            lastReport
+              ? JSON.stringify(lastReport, null, 2)
+              : "No routing result in this session.",
+          ].join("\n"),
           "info",
         );
       },

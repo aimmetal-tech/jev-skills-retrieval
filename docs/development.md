@@ -60,3 +60,11 @@ SkillsBench 的 `fix-druid-loophole-cve/verifier/test_outputs.py` 被安全软�
 持久化、无界面配置、环境变量优先级、忙碌拒绝及模型会话脱敏。
 沙盒阻断本机假服务连接和文件替换后，使用正常主机权限完成复验。
 剪贴板测试注入假文本；未读取开发者真实剪贴板或凭据，未调用线上模型。
+
+2026-10-19 运行可见性：`npm run check` 的类型、Lint、110 项测试及构建通过；
+`npm run verify:package` 确认 46 个文件的包由真实 Pi 1.3.0 loader 加载成功。
+新增验证在真实 Pi/本机假 provider 边界比对 UI 与请求，覆盖常驻 widget、
+凭据等待、批次进度、正常/零命中/关闭自动选择/回退、旧会话、取消和 payload 改写；
+同轮工具续跑去重，安全会话条目不含技能正文、prompt 或 key。
+纯解析测试覆盖 Completions/Responses/Anthropic system 字段、同数量目录替换及未知格式。
+未执行真实宿主终端的人工截图验收，未调用线上模型。

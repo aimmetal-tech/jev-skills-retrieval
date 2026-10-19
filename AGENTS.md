@@ -9,6 +9,7 @@ README 只保留用途、最短上手、关键结果和文档入口。[配置](d
 ## 项目目标和边界
 
 - 正常用户请求只路由一次，工具续跑复用选择；每条新请求创建新的路径身份快照。固定路径和显式 `/skill:name` 优先，正文仍由 Pi 原生处理。
+- 编辑器上方常驻 `[jev-skills-retrieval]` 运行指示，显示等待任务、凭据等待、Jev 评分进度及筛选/回退/跳过/阻塞；状态栏与命令同步。发送前在本扩展检查点只核验已知 provider system 字段的技能目录，不记录 payload；未知格式标为无法核验，后续扩展仍可能改写。`jev-skill-prompt` 会话条目只记录枚举与数量，不改路由/成本报告。
 - 成功零命中与服务失败不同。服务错误显式回退；缺 key、取消、无 UI 或保存失败阻塞/取消当前任务，不向聊天 provider 继续发送。凭据等待不计入路由 deadline。
 - 完整候选按 JSON 字节保护分批；同一查询批次串行，默认完成后间隔 1 秒。全部评分成功后统一筛选，不把部分覆盖伪装成正常结果。生产 SDK 重试为 0；BM25/向量预筛选尚未实现。
 - 默认准备/评估/总时限为 5/10/15 秒，单批 10 秒；48,000 字节 payload、24,000 字节 state+单题、128 批是本地保护，不是服务 Token 上界。较大目录需显式配置；不可静默延长操作者给出的 guard。
@@ -28,6 +29,7 @@ README 只保留用途、最短上手、关键结果和文档入口。[配置](d
 .
 +-- src/
 |   +-- pi-adapter.ts          # Pi 生命周期、目录快照、诊断
+|   +-- prompt-status.ts       # 运行指示、provider 目录核验与安全计数
 |   +-- selection.ts           # 路径身份、去重、固定项与预算选择
 |   +-- router.ts              # 凭据等待外的路由阶段与时限
 |   +-- batching.ts            # 完整候选装包、串行调度与评分合并
@@ -48,6 +50,7 @@ README 只保留用途、最短上手、关键结果和文档入口。[配置](d
 |   +-- requirements*.txt      # Python 依赖锁定（另有 requirements.in）
 |   `-- README.md              # 准备、运行、协议 2/3、恢复操作
 +-- tests/                     # 核心行为、真实 Pi/HTTP 边界、检查点
+|   `-- prompt-status.test.ts  # 提示词目录核验、未知格式与显示状态
 +-- scripts/
 |   +-- verify-package.ts      # npm 白名单与实际 Pi loader 检查
 |   +-- publish-snapshot.ts    # 精简导出、来源核对、离线复算
@@ -100,6 +103,8 @@ flowchart TD
   I --> J
   J --> K["原生读取正文；工具续跑复用选择"]
   F --> L["实际 HTTP 尝试结算及脱敏诊断"]
+  J --> M["before_provider_request 目录核验（本扩展检查点）"]
+  M --> N["常驻运行指示、状态命令与 jev-skill-prompt 安全计数"]
 ```
 
 ## 开发命令

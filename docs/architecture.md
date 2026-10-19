@@ -66,6 +66,20 @@ flowchart TD
 
 改展示名不会改写旧检查点、原始归档或本机工作区路径。地址优先级、配置字段和交互细节见[配置文档](configuration.md)。
 
+## 运行可见性与提示词核验
+
+`pi-adapter.ts` 在编辑器上方使用 Pi 原生 widget 显示 `[jev-skills-retrieval]`，
+并同步状态栏及状态命令。阶段包括准备目录、凭据等待、Jev 评分（已完成批数）、
+筛选完成、完整目录回退、仅固定项、跳过及阻塞。工具续跑复用选择，
+相同结果通知和安全会话条目在同轮内去重。
+
+`prompt-status.ts` 在本扩展的 `before_provider_request` 检查点，从已知 provider
+system 字段提取技能目录片段，与 Pi 原生 formatter 的计划输出比较。
+它不读取用户/工具文本，不把完整 payload 写入状态或会话；只有状态与数量进入
+独立的 `jev-skill-prompt` 条目。未知格式保持未核验，目录不符显示改写提示。
+后续扩展仍可能改写 payload；核验也不代表 HTTP 已成功发送。
+这层只观察，不修改 provider payload、路由结果、尝试回调记账或请求预算。
+
 ## 评测隔离
 
 `benchmark/` 通过真实 Pi provider 边界计数。普通离线测试用本机假服务和假 key，不使用真实账户。真实 SkillRet 使用 Pi 原生 OpenAI OAuth `gpt-6-luna` / `medium`；Jev 是独立服务。不能用通用 `LLM_BASE_URL` 代替原生账户，也不能从该 URL 的模型列表推断 OAuth 模型可用性。

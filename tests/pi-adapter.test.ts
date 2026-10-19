@@ -190,6 +190,7 @@ async function harness(
           uiContext: {
             notify() {},
             setStatus() {},
+            setWidget() {},
             ...interaction.ui,
           } as ExtensionUIContext,
         }
@@ -225,6 +226,192 @@ function payloadText(payload: Payload | undefined): string {
   assert(payload, "Expected an actual HTTP provider request");
   return JSON.stringify(payload.messages);
 }
+
+function promptIndicators() {
+  const statuses: string[] = [];
+  const widgets: string[] = [];
+  const notices: string[] = [];
+  return {
+    statuses,
+    widgets,
+    notices,
+    ui: {
+      notify: (message: string) => notices.push(message),
+      setStatus: (_key: string, text: string | undefined) => {
+        if (text) statuses.push(text);
+      },
+      setWidget: (_key, factory, options) => {
+        assert.equal(options?.placement, "aboveEditor");
+        if (typeof factory === "function") {
+          const component = factory(
+            {} as Parameters<NonNullable<typeof factory>>[0],
+            {} as Parameters<NonNullable<typeof factory>>[1],
+          );
+          const text = component.render(100).join("\n");
+          assert.match(text, /\[jev-skills-retrieval\]/);
+          widgets.push(text);
+        }
+      },
+    } satisfies Partial<ExtensionUIContext>,
+  };
+}
+
+test("visible Jev indicators distinguish filtered, zero-hit, fallback and disabled requests at the real provider boundary", async () => {
+  for (const scenario of [
+    "filtered",
+    "zero",
+    "fallback",
+    "disabled",
+  ] as const) {
+    const indicator = promptIndicators();
+    let evaluations = 0;
+    const h = await harness(
+      (root) =>
+        createSkillRouterExtension({
+          configuration: () =>
+            configuration(
+              root,
+              scenario === "disabled" ? { maxAutoSkills: 0 } : {},
+            ),
+          evaluate: async (request) => {
+            evaluations++;
+            if (scenario === "fallback")
+              throw new RoutingFailure(
+                "authentication",
+                "Jev authentication failed (HTTP 401).",
+              );
+            return score(request, scenario === "filtered" ? ["alpha"] : []);
+          },
+        }),
+      true,
+      undefined,
+      { mode: "tui", ui: indicator.ui },
+    );
+    try {
+      assert.match(indicator.widgets.at(-1) ?? "", /已启用.*等待任务/);
+      const catalogCount = h.loader.getSkills().skills.length;
+      await h.session.prompt("Task");
+      const label =
+        scenario === "fallback"
+          ? "全量回退"
+          : scenario === "disabled"
+            ? "仅固定项"
+            : "先筛选后发送";
+      const count =
+        scenario === "fallback"
+          ? catalogCount
+          : scenario === "filtered"
+            ? 2
+            : 1;
+      const expected = new RegExp(
+        `${label}.*请求含 ${count}/${catalogCount} 项`,
+      );
+      assert.match(indicator.statuses.at(-1) ?? "", expected);
+      assert.match(indicator.widgets.at(-1) ?? "", expected);
+      assert.match(indicator.statuses.at(-1) ?? "", /发送前已核验/);
+      assert.equal(evaluations, scenario === "disabled" ? 0 : 1);
+      assert.equal(
+        indicator.notices.filter((text) => expected.test(text)).length,
+        1,
+        "tool continuation must not repeat an unchanged notice",
+      );
+      assert.equal(h.payloads.length, 2);
+      const text = payloadText(h.payloads[0]);
+      assert.match(text, /UNIQUE_METADATA_PINNED/);
+      if (scenario === "fallback") assert.match(text, /UNIQUE_METADATA_BETA/);
+      else assert.doesNotMatch(text, /UNIQUE_METADATA_BETA/);
+      if (scenario === "filtered") assert.match(text, /UNIQUE_METADATA_ALPHA/);
+      await h.session.prompt("/jev-skill status");
+      assert.match(indicator.notices.at(-1) ?? "", expected);
+      const records = h.session.sessionManager
+        .getBranch()
+        .filter(
+          (entry) =>
+            entry.type === "custom" && entry.customType === "jev-skill-prompt",
+        );
+      assert.equal(records.length, 1);
+      assert.doesNotMatch(
+        JSON.stringify(records),
+        /UNIQUE_METADATA|local-test-only|Task/,
+      );
+      assert.deepEqual(h.errors, []);
+    } finally {
+      await h.close();
+    }
+  }
+});
+
+test("persistent Jev widget shows credential wait and scoring before the provider runs", async () => {
+  const indicator = promptIndicators();
+  let enterKey: (value: string) => void = () => {};
+  let opened: () => void = () => {};
+  const inputOpened = new Promise<void>((resolve) => {
+    opened = resolve;
+  });
+  let finishEvaluation: () => void = () => {};
+  let scoring: () => void = () => {};
+  const scoringStarted = new Promise<void>((resolve) => {
+    scoring = resolve;
+  });
+  const evaluationReleased = new Promise<void>((resolve) => {
+    finishEvaluation = resolve;
+  });
+  const h = await harness(
+    (root) =>
+      createSkillRouterExtension({
+        getApiKey: () => undefined,
+        configuration: () => configuration(root),
+        evaluate: async (request) => {
+          scoring();
+          await evaluationReleased;
+          return score(request, ["alpha"]);
+        },
+      }),
+    false,
+    undefined,
+    {
+      mode: "rpc",
+      ui: {
+        ...indicator.ui,
+        input: async () => {
+          opened();
+          return new Promise<string>((resolve) => {
+            enterKey = resolve;
+          });
+        },
+      },
+    },
+  );
+  try {
+    const pending = h.session.prompt("Task with missing key");
+    await inputOpened;
+    assert.match(
+      indicator.widgets.at(-1) ?? "",
+      /等待 API key.*尚未发送主模型/,
+    );
+    assert.equal(h.payloads.length, 0);
+    enterKey("indicator-test-key");
+    await scoringStarted;
+    assert.match(
+      indicator.widgets.at(-1) ?? "",
+      /Jev 评分中.*已完成 0 批.*尚未发送主模型/,
+    );
+    assert(
+      indicator.notices.some((text) =>
+        /\[jev-skills-retrieval\] 已启动/.test(text),
+      ),
+    );
+    assert.equal(h.payloads.length, 0);
+    finishEvaluation();
+    await pending;
+    assert(indicator.widgets.some((text) => /已完成 1 批/.test(text)));
+    assert.match(indicator.widgets.at(-1) ?? "", /先筛选后发送/);
+    assert.deepEqual(h.errors, []);
+  } finally {
+    finishEvaluation();
+    await h.close();
+  }
+});
 
 test("actual provider payload contains selected and pinned metadata; tool continuation reuses it", async () => {
   let routes = 0;
@@ -438,6 +625,50 @@ test("later forced prompt override emits a conflict diagnostic", async () => {
   }
 });
 
+test("a provider payload override is displayed as a mismatch even when Pi's planned prompt is still routed", async () => {
+  const indicator = promptIndicators();
+  const diagnostics: string[] = [];
+  const h = await harness(
+    (root) => async (pi) => {
+      pi.on("before_provider_request", (event) => {
+        const payload = event.payload as {
+          messages: Array<{ role: string; content: unknown }>;
+        };
+        return {
+          ...payload,
+          messages: payload.messages.map((message) =>
+            message.role === "system"
+              ? { ...message, content: "Replaced at the provider boundary" }
+              : message,
+          ),
+        };
+      });
+      await createSkillRouterExtension({
+        configuration: () => configuration(root),
+        evaluate: async (request) => score(request, ["alpha"]),
+        onDiagnostic: (message) => diagnostics.push(message),
+      })(pi);
+    },
+    false,
+    undefined,
+    { mode: "tui", ui: indicator.ui },
+  );
+  try {
+    await h.session.prompt("Task");
+    assert.match(
+      payloadText(h.payloads[0]),
+      /Replaced at the provider boundary/,
+    );
+    assert.doesNotMatch(payloadText(h.payloads[0]), /UNIQUE_METADATA/);
+    assert.match(indicator.widgets.at(-1) ?? "", /目录被改写.*请求含 0/);
+    assert.doesNotMatch(indicator.widgets.at(-1) ?? "", /先筛选后发送/);
+    assert.match(diagnostics.join("\n"), /conflict/);
+    assert.deepEqual(h.errors, []);
+  } finally {
+    await h.close();
+  }
+});
+
 test("cancellation while waiting for routing never restarts the Pi provider", async () => {
   let started: (() => void) | undefined;
   const ready = new Promise<void>((resolve) => {
@@ -547,15 +778,20 @@ test("a later successful zero hit removes the active automatic section", async (
 test("reloading an existing conversation clearly skips unsupported history takeover", async () => {
   let calls = 0;
   const diagnostics: string[] = [];
-  const h = await harness((root) =>
-    createSkillRouterExtension({
-      configuration: () => configuration(root),
-      evaluate: async (request) => {
-        calls++;
-        return score(request, ["alpha"]);
-      },
-      onDiagnostic: (message) => diagnostics.push(message),
-    }),
+  const indicator = promptIndicators();
+  const h = await harness(
+    (root) =>
+      createSkillRouterExtension({
+        configuration: () => configuration(root),
+        evaluate: async (request) => {
+          calls++;
+          return score(request, ["alpha"]);
+        },
+        onDiagnostic: (message) => diagnostics.push(message),
+      }),
+    false,
+    undefined,
+    { mode: "tui", ui: indicator.ui },
   );
   try {
     await h.session.prompt("First task");
@@ -564,6 +800,8 @@ test("reloading an existing conversation clearly skips unsupported history takeo
     assert.equal(calls, 1);
     assert.match(diagnostics.join("\n"), /requires a fresh session/);
     assert.match(payloadText(h.payloads[1]), /UNIQUE_METADATA_BETA/);
+    assert.match(indicator.widgets.at(-1) ?? "", /未筛选.*旧会话/);
+    assert.doesNotMatch(indicator.widgets.at(-1) ?? "", /先筛选后发送/);
     assert.deepEqual(h.errors, []);
   } finally {
     await h.close();
@@ -1303,6 +1541,7 @@ test("RPC empty key input stays blocked until a nonempty value is supplied", asy
 test("cancelling the key dialog cancels this task instead of falling back; the next task can retry", async () => {
   const transport = sdkTransport();
   const reports: RouteReport[] = [];
+  const indicator = promptIndicators();
   let prompts = 0;
   const ui = terminalInput((input) => {
     if (++prompts === 1) input.handleInput("\x1b");
@@ -1321,7 +1560,7 @@ test("cancelling the key dialog cancels this task instead of falling back; the n
       }),
     false,
     undefined,
-    { ui, mode: "tui" },
+    { ui: { ...indicator.ui, ...ui }, mode: "tui" },
   );
   try {
     await h.session.prompt("Cancelled before credentials");
@@ -1329,6 +1568,7 @@ test("cancelling the key dialog cancels this task instead of falling back; the n
     assert.equal(h.payloads.length, 0);
     assert.equal(reports[0]?.status, "blocked");
     assert.equal(reports[0]?.reason, "missing_key");
+    assert.match(indicator.widgets.at(-1) ?? "", /未发送主模型/);
     assertOnlyPiAbort(h.errors);
     h.errors.length = 0;
     await h.session.prompt("Retry with credentials");
@@ -1336,6 +1576,7 @@ test("cancelling the key dialog cancels this task instead of falling back; the n
     assert.equal(transport.requests.length, 1);
     assert.equal(h.payloads.length, 1);
     assert.equal(reports[1]?.status, "selected");
+    assert.match(indicator.widgets.at(-1) ?? "", /先筛选后发送/);
     assert.deepEqual(h.errors, []);
   } finally {
     await h.close();
