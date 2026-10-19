@@ -1,15 +1,20 @@
 {
-  "name": "jev-skill-router",
+  "name": "jev-skills-retrieval",
   "version": "0.1.0",
-  "description": "Per-request Jev skill routing for the Pi coding agent",
+  "description": "Per-request skill retrieval with Jev for the Pi coding agent",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aimmetal-tech/jev-skills-retrieval.git"
+  },
+  "homepage": "https://github.com/aimmetal-tech/jev-skills-retrieval",
   "keywords": [
     "pi-package",
     "pi-extension",
     "skills",
     "jev",
-    "routing"
+    "retrieval"
   ],
   "engines": {
     "node": ">=22.19.0"
@@ -18,7 +23,7 @@
     "dist",
     "README.md",
     "LICENSE",
-    "docs"
+    "docs/configuration.md"
   ],
   "exports": {
     ".": "./dist/pi-adapter.js"
@@ -42,6 +47,7 @@
     "benchmark:verify": "tsx benchmark/selftest.ts",
     "benchmark:check": "tsx benchmark/check.ts",
     "verify:package": "tsx scripts/verify-package.ts",
+    "results:verify": "tsx scripts/publish-snapshot.ts",
     "check": "npm run typecheck && npm run lint && npm test && npm run build",
     "prepack": "npm run build"
   },

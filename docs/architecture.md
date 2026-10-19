@@ -1,0 +1,68 @@
+# 架构与数据流
+
+Jev Skills Retrieval 是 Pi 1.3.0 原生 TypeScript 扩展。Pi 负责发现技能、格式化目录、加载显式技能和读取原始正文；扩展只为每条正常用户请求确定本轮活动目录。
+
+```mermaid
+flowchart TD
+  A["原始用户输入"] --> B["Pi before_agent_start"]
+  C["Pi 发现的完整技能目录"] --> B
+  D["用户与项目配置"] --> B
+  B --> E["请求内路径身份快照与候选准备"]
+  E --> F["固定项基线与凭据门禁"]
+  F -->|"缺凭据或取消"| X["阻塞或取消当前任务"]
+  F --> G["原始问题及有界可见历史"]
+  G --> H["完整候选按 JSON 字节保护分批"]
+  H --> I["Jev 独立 Noul 评分，批次串行"]
+  I --> J["完整评分校验与合并"]
+  J --> K["阈值、Top K、metadata 预算"]
+  K --> L["原始 Skill 对象加固定项"]
+  I -->|"服务错误或超时"| M["显式回退完整目录及有效固定项"]
+  L --> N["Pi 原生 formatter 与 provider"]
+  M --> N
+  N --> O["模型通过原生工具读取 SKILL.md"]
+  O --> P["工具续跑复用本轮选择"]
+```
+
+## 请求内快照
+
+`src/pi-adapter.ts` 在凭据门禁前创建目录快照。`selection.ts` 为每条路径只解析一次规范身份，复用去重、固定项和候选。成功选择与失败回退使用同一份快照；下一条正常用户请求重新创建，避免复用失效路径。
+
+固定路径只引用 Pi 已发现且仍存在的技能，不触发额外正文加载。显式 `/skill:name` 由 Pi 原生展开，路由上下文保留展开前的用户原文。同轮工具续跑不重复路由。
+
+`context.ts` 保留原始当前输入、有界历史和前轮 metadata。扩展自己的历史仅记录助手可见文本，不吸收工具结果、思考、技能正文或自定义会话条目。已有历史会话重载扩展后跳过路由，需 `/new`；历史中已出现的正文或 prompt delta 不会删除。
+
+## 分批与选择
+
+`batching.ts` 使用与 `jev-client.ts` 相同的请求构造器按确定性顺序装包。默认每批最多 48,000 个未压缩 JSON UTF-8 字节，state 加任意一道题最多 24,000 字节，最多 128 批。它们是字节保护，不能证明满足服务 Token 上限。
+
+单个查询的批次串行，完成后间隔 1 秒；每个有效候选恰好评分一次。只有全部批次评分成功，才进行统一阈值、Top K 和 Pi formatter 实际 metadata 字符预算筛选。字符以 JavaScript UTF-16 长度计算，不是 Token。固定项和显式正文不占自动预算；没有 BM25/向量预筛选。
+
+生产 SDK 重试固定为 0。任一批失败后不继续评分，也不把未评分候选当零分。成功零命中、显式回退、缺 key 阻塞、调用者取消有不同状态。尝试回调在结算后、下次调用前同步执行；最终路由报告只汇总，不重复记账。
+
+## 时限与失败
+
+`router.ts` 默认准备 5 秒、评估 10 秒、总计 15 秒，单批 10 秒。准备时间计入总预算，凭据输入/存储等待排除。同步文件操作不能被 JavaScript 定时器抢占，完成后检查时限；SDK、网络和解析计入评估时间。
+
+诊断分别记录 preparation/evaluation/selection 耗时及 timeoutPhase。服务错误明确回退；缺凭据、输入取消、无 UI、保存失败则停止当前 Pi 任务。只允许安全错误码进入日志，不转发任意服务错误正文。已观察到的部分 usage 在后续失败后仍保留。
+
+## 凭据与兼容
+
+`credentials.ts` 优先读 `TYPESAFE_API_KEY`，其次读取专用用户文件，再等待交互输入。Windows 使用当前用户 DPAPI，POSIX 使用 0700 目录/0600 文件。秘密通过子进程 stdin 传入，不放命令参数；不自动持久化环境变量中的 key。
+
+项目和包改名为 `jev-skills-retrieval`，以下接口仍保持原值：
+
+| 接口 | 兼容标识 |
+| --- | --- |
+| 凭据目录 | `~/.jev-skill-router/credentials.json` |
+| 配置文件 | `.pi/skill-router.json`、Pi agent 目录的 `skill-router.json` |
+| 命令 | `/jev-skill`、`/skill-router-status` |
+| 会话诊断类型 | `jev-skill-router` |
+| 评测内部组名 | `native`、`router` |
+
+改展示名不会改写旧检查点、原始归档或本机工作区路径。地址优先级、配置字段和交互细节见[配置文档](configuration.md)。
+
+## 评测隔离
+
+`benchmark/` 通过真实 Pi provider 边界计数。普通离线测试用本机假服务和假 key，不使用真实账户。真实 SkillRet 使用 Pi 原生 OpenAI OAuth `gpt-6-luna` / `medium`；Jev 是独立服务。不能用通用 `LLM_BASE_URL` 代替原生账户，也不能从该 URL 的模型列表推断 OAuth 模型可用性。
+
+协议 2 的串行持久化运行与 `benchmark/parallel/` 协议 3 相互独立。协议 3 两组各有任务池，每组 N=3/5；单查询内部批次仍串行。它在 HTTP 门禁外管理重试、共享冷却及检查点，不改变生产路由的零重试策略。详细操作与恢复边界见[评测说明](../benchmark/README.md)。

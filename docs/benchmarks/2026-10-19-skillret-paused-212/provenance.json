@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "project": "jev-skills-retrieval",
+  "sourceRunId": "per-group-20261019-104926-full-5",
+  "frozenSnapshotId": "per-group-20261019-104926-stopped-20261019-142910",
+  "stoppedAt": "2026-10-19T06:27:47.841Z",
+  "sourceCommit": "e02d7a3a7fb269f54ccef1933b4bb48170e4b62f",
+  "originalParallelCommit": "bb2391e97225c1d9612191a6e7a86354b5bdaec7",
+  "dataset": {
+    "repository": "ThakiCloud/SKILLRET",
+    "revision": "a050ad233a504a43135bafe8cdf45574052b5729",
+    "queries": 4392,
+    "skills": 6006,
+    "qrels": 7187
+  },
+  "execution": {
+    "provider": "openai",
+    "model": "gpt-6-luna",
+    "authentication": "pi-oauth",
+    "thinking": "medium",
+    "piVersion": "1.3.0",
+    "jevModel": "jev-1.14.0"
+  },
+  "legacyPreparedManifestModelLabel": "openai-gpt-6-luna",
+  "coverage": {
+    "nativeCompleted": 695,
+    "routerCompleted": 212,
+    "paired": 212,
+    "completeUsagePaired": 199,
+    "expectedPerGroup": 4392,
+    "catalogSkills": 6006
+  },
+  "archive": {
+    "bytes": 1331919872,
+    "sha256": "c569537186d094579a899f0f66434eb9c6eec434619706ef26c1bb66490f3e8f",
+    "verifiedSourceFiles": 25629,
+    "published": false
+  },
+  "sourceJournalSha256": "89620e1d9a5f73de7a88495216c499148b1dfb9fdf3cffe1d9d1c260377207a5",
+  "sourceFilesSha256": {
+    "reports/paired-completed/results.jsonl": "0ede9d146ae45abd061998287804d17dacafe4c9cd40319ce4796c4705e29d17",
+    "reports/paired-completed/summary.json": "b58c70fe6f72acebe7864c5e4a30ef9f327a6dc30075be8d5749251cd38a3114",
+    "reports/paired-usage-complete/summary.json": "ba57b532f2914207ccad146027e085c7926ea9c490f3895549684e6936eca69a",
+    "reports/paired-queries.csv": "7f3518ece277c8c5474defe0f43f257c03473a8459d6700bc2e0bc3e7e64746b",
+    "reports/snapshot.json": "6523fe91ae97f7874db4499e9d23c9e62ce48cfa12cddf428b57e33a3b71161f",
+    "provenance/sources.json": "547a72888eb9dd872ed199531ee4fc01260886a44debb417c4c11b9c07081230",
+    "provenance/prepared-data-manifest.json": "6d8d49874db3a220d8dad968025ab79ef3925a47654b310bcae171642e115682",
+    "archive-verification.json": "8993c5a673d60dbbaec999132082ee4ad58abb7cce32690b263fe76bd6668f3d"
+  },
+  "filesSha256": {
+    "compact-evidence.jsonl": "38f2474b543be7b38633e833e72841979c5fd8cf5ccd9ebb0190838aea8f3c7b",
+    "summary.json": "64cd75592cec6fd78fdfb36bbc54be10fae4ec99ba5b9904547a2f1a9e1a7c88",
+    "paired-queries.csv": "7f3518ece277c8c5474defe0f43f257c03473a8459d6700bc2e0bc3e7e64746b"
+  },
+  "limitations": [
+    "Completed common-query subset, not a random/full-test estimate",
+    "Metadata adaptation; not an official SkillRet leaderboard or SkillsBench task result",
+    "Unknown usage retained; main-sample total tokens and tokens/success remain null",
+    "Cache counted once; reasoning is an output subset; token counts are not billed cost",
+    "Harness repaired during run; online timing includes queue, retries and recovery",
+    "Curated IDs/usage permit metric recomputation, not independent regrading of raw responses"
+  ]
+}

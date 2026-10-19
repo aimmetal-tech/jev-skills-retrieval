@@ -1,373 +1,128 @@
-# Jev Skill Router
+# Jev Skills Retrieval
 
-## Product and boundary
+## 项目概要
 
-Implement the confirmed Pi v1 specification from `pi-skill-router-spec.html`.
-TypeScript native extension; Pi discovers skills and reads their original bodies.
-Route each normal user request once. Reuse that choice during tool continuations.
-Pinned paths and explicit `/skill:name` calls take precedence. Successful zero hits
-and routing failures are different. Do not claim support for mid-run steering,
-resumed pre-extension sessions, other harnesses, or removal of historical skills.
-The user superseded the original missing-key fallback: missing credentials now
-block the current Pi task until supplied. Cancel/no UI/dialog failure stops the
-task without sending a provider request; never silently fall back for missing keys.
-The user subsequently authorized persistence in the home directory. Persist only
-to `~/.jev-skill-router/credentials.json`; never to project config or session data.
+本项目是 Pi 1.3.0 原生 TypeScript 扩展：Jev 对完整技能 metadata 评分，Pi 原生 formatter 和工具负责加载与读取技能正文。项目与包名为 `jev-skills-retrieval`，兼容接口仍使用旧标识，见[架构](docs/architecture.md)。
 
-## Structure and data flow
+README 只保留用途、最短上手、关键结果和文档入口。[配置](docs/configuration.md)、[开发](docs/development.md)、[评测操作](benchmark/README.md)与[历史验证](docs/verification.md)各自维护细节。
 
-- `src/pi-adapter.ts`: Pi lifecycle entry point and per-run structured skill catalog.
-- `src/selection.ts`: request-local canonical path identity cache and catalog
-  snapshot; deduplication, pinned clones and candidates are reused through routing
-  and fallback. Never reuse the snapshot across normal user requests.
-- `src/router.ts`: preparation/evaluation deadlines under a total safety deadline
-  (excluding credential waiting), stage timings, early cancellation and fallback.
-  After solution A reached Jev but the old 3s total expired, the user authorized
-  increasing/splitting limits: defaults are 5s preparation, 10s evaluation, 15s
-  total. Existing routeTimeoutMs overrides remain a total cap. Synchronous local
-  work is checked after completion, not forcibly preempted by JavaScript timers.
-- `src/batching.ts`: deterministic full-catalog byte-guard packing and strictly
-  serial dispatch (concurrency fixed at 1), default 1s completion-to-next-start
-  interval, per-batch cancellation/deadline, complete-score merging and per-attempt
-  sanitized evidence. Defaults: 48,000 uncompressed JSON bytes per batch, 24,000
-  bytes for state plus any question, 128 planned calls, 10s per call. Byte guards
-  are not verified Jev token bounds. No prefiltering, prompt changes or retries.
-- `src/jev-client.ts`: official SDK batch Noul requests, strict response validation,
-  sanitized failure codes, allowlisted `max_tokens_exceeded` service detail,
-  actual model version and token usage. Never forward arbitrary server error data.
-  Shared question/request builders keep byte planning identical to SDK payloads;
-  independently observed usage is retained even when answer validation fails.
-- `src/context.ts`: raw current input, bounded visible conversation and prior metadata.
-- `src/credentials.ts`: environment-first credential resolution, blocking input,
-  cached user-file fallback, explicit key editing/reset and shutdown cache cleanup.
-- `src/credential-store.ts`: home-directory credential persistence, atomic writes,
-  Windows current-user DPAPI encryption and POSIX 0700-directory/0600-file modes.
-- `src/key-prompt.ts`: masked TUI credential input and native RPC input bridge.
-- `src/commands.ts`: `/jev-skill` configuration/help/status subcommands, native
-  argument completions and contextual input hints; preserves legacy status command.
-- `src/base-url.ts`: HTTP(S) API-root validation, endpoint resolution and atomic
-  project `baseUrl` writes that preserve unrelated fields and reject invalid JSON.
-- `src/config.ts`: defaults and validated user/project configuration merge.
-  Its explicit model default is shared by routing and evaluation.
-- `tests/*.test.ts`: core and real Pi provider-boundary integration tests.
-- `tests/credential-fixtures.ts`: isolated memory stores for existing tests; real
-  file-store tests use temporary fake homes, never the developer's home or keys.
-- `eval/dataset.ts`: eight bounded synthetic metadata evaluation cases.
-- `eval/run.ts`: preview by default; explicit `--live` runs real Jev requests and
-  writes partial evidence after each request to `outputs/evaluation.json`.
-- `eval/metrics.ts`: recall, false discoveries, zero hits, model, tokens and latency;
-  never count full fallback as successful recall or claim unknown billed costs.
-- `benchmark/`: full public SkillRet and SkillsBench preparation and isolated Pi
-  benchmark harness, added after the user confirmed the grilling design. Default
-  execution is preview/offline only. The user subsequently authorized real tests
-  without a monetary budget cap, and explicitly selected Pi's existing OpenAI
-  OAuth account, chat model `gpt-6-luna`, and `medium` thinking. Do not send this
-  model through generic LLM_BASE_URL or substitute an API-key provider. Native
-  account metadata/auth is reused in place, never copied to artifacts or sandboxes.
-  `sources.json` pins SkillRet test revision and separate SkillsBench task
-  archive/registry commits; `requirements.in` and `requirements.txt` lock Python.
-  `prepare.py` downloads/audits data; `data.ts` validates hashes and native skill
-  discovery; `preflight.py` checks all official task digests using BenchFlow 0.6.3.
-  `run.ts`, `pi.ts`, `budget.ts`, `types.ts` isolate and observe fixed Pi 1.3.0 runs;
-  `remote.ts`, `task-worker.ts`, `skillsbench.py` bridge host tools into official
-  Docker sandboxes. `benchflow_compat.py` narrowly rebinds pure sandbox-path helpers
-  to POSIX semantics on Windows, without changing tasks, verifier or privileges.
-  `metrics.ts` and `report.py` produce JSON/CSV/PNG/SVG/HTML; `selftest.ts` verifies
-  a harmless Docker fixture with loopback fake providers. `benchmark/README.md`
-  defines setup, limits, protocol differences and evidence boundaries.
-  `check.ts` runs Ruff and `test_harness.py` regressions for quarantine extraction,
-  archive traversal and POSIX path validation without Docker or model calls.
-  `transport.ts` explicitly uses BENCHMARK_HTTP_PROXY > HTTPS_PROXY > HTTP_PROXY
-  when configured, without direct fallback; no proxy URL/credentials in evidence.
-  Per-provider budget wrappers count inference requests. Process-local fetch also
-  routes native OAuth refresh consistently; it is not a global budget counter.
-  `profile.ts` defines an explicit full-catalog benchmark profile: 590s evaluation,
-  600s total, serial batches; interactive defaults remain 10s evaluation/15s total.
-  Benchmark task timeout is still an explicit CLI guard; use at least 720s to leave
-  Pi execution time after full routing. Never silently raise a supplied guard.
-  `checkpoint.ts` implements checkpoint protocol 2 for SkillRet trials: fsynced
-  pending HTTP reservations, sanitized attempt usage, hashes and locally retained
-  successful real provider bodies. Matching responses replay into a fresh Pi
-  session without another paid request; authorization/cookies are never saved.
-  Windows atomic replacements tolerate transient reader locks for up to 2s;
-  persistent checkpoint/observer writes stop further HTTP with checkpoint_failure.
-  `recovery.ts` owns the run lease (Windows native named mutex via a hidden helper;
-  POSIX loopback lease), fsynced result journal and conservative torn-tail repair.
-  `psmux.ps1` starts a detached named psmux session with a fresh output directory
-  by default; `-Resume` is explicit and only supports identical protocol-2 code,
-  model, suite and task guards. Never import legacy evidence into a new run.
-  psmux protects terminal disconnects, not reboot; checkpoints support later restart.
-  User confirmed a separate parallel protocol 3, not an alteration or resumption of
-  the stopped protocol-2 runs. `benchmark/parallel/` contains `protocol.ts` (frozen
-  limits, seeded query-length calibration), `coordinator.ts` (single fsynced journal
-  writer, group leases, shared costs/cooldowns/service pauses/manual recovery),
-  `ipc.ts` (local named pipe on Windows / Unix socket), `timing.ts` (disjoint work,
-  queue, backoff, cooldown and cumulative online time), `checkpoint.ts` (real paid
-  response replay in the same experiment), `worker.ts` (one process per group and
-  a task pool), `reporting.ts` (single report writer and frozen selection rule),
-  `pipeline.ts` (calibrate 3 then 5, select, automatically start a fresh full run),
-  `start.ps1` (hidden coordinator launch), `session.ps1` (two detached psmux group
-  sessions). Per-group task limits are independent: N=3/5 means up to 6/10 Pi
-  requests account-wide and 3/5 Jev requests. Per-query Jev batches stay serial,
-  with query-local 1s pacing; no global 1s gate that accidentally serializes pools.
-  SDK retries remain disabled. Protocol 3 performs first+5 attempts, exponential
-  5/10/20/40/80s plus 0–20% positive jitter, honors longer server Retry-After,
-  shares provider cooldowns and releases HTTP slots while waiting. Retryable
-  codes: 408/429/500/502/503/504/529 and network/timeout failures. Exhaustion
-  pauses the affected provider (Pi both groups; Jev router only). Ordinary restart
-  never resets counts; explicit operator new cycles retain all prior costs.
-  Actual attempts retain Jev10s/Pi120s timeouts. Route work=600s, trial work=1200s,
-  cumulative online=3600s; queue/backoff/cooldown are separate, failed actual work
-  is charged. Offline/user-pause time is excluded from online, natural elapsed is
-  retained. Guard exhaustion pauses rather than fabricating a completed failure.
-  Only operator commands append budget or retry cycles, never erase history.
-  Pi adapter's optional onRouteStart observer and Pi trial's durability/config
-  seams leave ordinary production timeouts, retry policy and behavior unchanged;
-  the parallel harness externally enforces work limits under a 1h wall safeguard.
-  Calibration is fixed 20 query-length strata with seed 20261019: 20 queries × 2
-  groups × 2 profiles =80 real trials. Both profiles use fresh calls, not cross-run
-  response replay. A qualifying profile must finish, have no circuit break/manual
-  recovery, and 429/529 fraction <=1%. Choose 5 only if eligible and >=20% faster;
-  otherwise eligible 3. Invalid 3 stops the pipeline. Full phase is fresh 8784
-  trials. Combined calibration HTTP guard=40000; full HTTP guard=700000; known
-  token guard=100000000000. Tokens remain a response-boundary stop, not a bill cap.
-  `coordinator.jsonl` is authoritative; `results.jsonl` is a derived completed
-  view. Partial running/paused costs are included in provisional summary reports.
-  Reports refresh every <=60s and on stop/end. Worker death preserves uncertain
-  reservations; coordinator loss is fail-closed and requires explicit recovery.
-  `tests/parallel.test.ts` and `parallel-pi.test.ts` cover IPC limits, shared budget,
-  cooldown scopes, six attempts/manual cycles, replay, independent clocks, restart
-  journal integrity, profile choice and six concurrent real Pi fake-provider calls.
-  Prior code is preserved at git b113211 and an ignored source archive under
-  `outputs/benchmark/source-archives/`; old evidence is never imported or edited.
-  Parallel native-account preflight must restore the local catalog with the
-  default offline refresh (allowModelNetwork:false). refreshOnCreate:false leaves
-  the model/auth snapshot uninitialized and cannot establish unavailability.
-  Observed 2026-10-19 live calibration is isolated at
-  `outputs/benchmark/parallel/per-group-20261019-104926/`: both 40-trial profiles
-  qualified; 3=158.24 trials/h, 5=273.20 trials/h, so full-5 started automatically.
-  Root calibration-verification.json/selection.json and calibration-throughput
-  PNG/SVG preserve the measured choice, separately from full accuracy results.
-  Original parallel source is bb2391e, archived under source-archives. On
-  2026-10-19 the user explicitly authorized repairing the harness and continuing
-  the same run without retesting completed queries. `resume.ts` provides explicit
-  offline `--upgrade-runtime-from <old-digest>` migration after the coordinator
-  and both workers stop. A narrow file-level compatibility gate and unchanged
-  policy/limits reject plugin/data/dependency changes; reviewed guard/resume-only
-  changes preserve original PhaseSpec.fingerprint checkpoint scopes. The new
-  optional runtimeFingerprint validates repaired worker source. Backups and exact
-  old/new hashes/commits are stored in runtime-upgrades; calibration stays intact.
-  Never silently rewrite scopes, discard results or import another experiment.
-  IPC now has a separate 60s local deadline and yields ready I/O before timeout;
-  replay yields I/O, while actual Jev10s/Pi120s limits are unchanged. Pi turn-limit
-  status survives abort errors, and guard/context/timeout outcomes pause only the
-  affected task. They do not fabricate completion or pause the provider. Real
-  provider pauses retain their source across Jev admission; worker pools persist
-  while paused and replace temporary serial-recovery/handoff scripts. Completed
-  jobs are immutable and never returned by next, including after recovery.
-  Status running:task_paused distinguishes held guard tasks from a provider-wide
-  pause while other queries continue; paused:tasks means only held tasks remain.
-  Formal attempts retain unknown costs even after a successful retry. Report
-  notes disclose harness upgrades and recovery latency; do not merge these into
-  homogeneous calibration throughput claims.
-  On 2026-10-19 the user requested stopping both groups and freezing results.
-  `outputs/benchmark/frozen/<run>-stopped-<timestamp>/` holds evidence.tar, an
-  every-file SHA256 manifest, verified archive contents, stop/process seal,
-  source/data provenance and separate derived reports. Never resume automatically
-  or overwrite frozen evidence. The stopped original retains resumable checkpoints.
-  Reports use completed common-query pairs; unequal all-completed coverage and
-  complete-usage subsets stay separate, with unknown costs retained. Last journal
-  running states whose workers exited are described as interrupted in derived
-  coverage, never rewritten in the source or counted as completed. Snapshot/report
-  artifacts are ignored and must not be committed with credentials or raw evidence.
-  Legacy protocol 2 (separate from the new parallel protocol above): the user
-  explicitly authorized unknown-cost recording followed by bounded backoff
-  retries in this persistent benchmark: `--continue-unknown-usage` retains unknown
-  totals, retries only 429/529/transport failures up to 3 additional attempts with
-  5/15/30s backoff (honoring server cooldowns up to 60s). Retry counts persist.
-  Every Jev actual attempt remains capped at 10s, concurrency 1 and 1s spacing;
-  the persistent profile allows 120s per logical batch for backoff, while keeping
-  590s evaluation/600s total and the explicit 720s task guard. Production routing
-  still has zero retries. SkillsBench sandbox mutations do not use response replay.
-  `diagnose-routing.ts` verifies the full 6,006-skill request-local snapshot offline
-  by default; `--live` sends at most 128 serial Jev requests, with no Pi generation.
-  It requires a fresh output directory, checkpoints attempts.jsonl/partial.json,
-  and exits nonzero on incomplete scoring or usage. Offline usage is a labelled
-  zero-valued fixture; only actual responses establish real costs or latency.
-  It writes sanitized preparation/HTTP/timing evidence below
-  `outputs/benchmark/diagnostics/`; this is not a task accuracy benchmark.
-- `benchmark/blocked-inputs.json`: the user-reported antivirus quarantine of
-  `fix-druid-loophole-cve/verifier/test_outputs.py` (ID A9E32DDD4DA1FF17).
-  Static review of the official pinned file found real CVE-2021-25646 exploit
-  regression payloads, not proof of benignness or a confirmed AV false positive.
-  Never automatically restore/re-extract or execute this blocked file/task.
-  Preserve the official 87-task denominator; currently 86 task digests match and
-  one is security-blocked. Full SkillsBench live execution stops before paid calls.
-- `tests/benchmark.test.ts`: real Pi HTTP-boundary benchmark tests with fake keys,
-  budget enforcement, inaccessible qrels, per-batch accounting without aggregate
-  double charges, unknown usage and report honesty. `tests/batching.test.ts`
-  checks all 6,006 identities, exact JSON byte sizes, serial/paced SDK calls,
-  global selection, failed/unknown/mixed responses, deadlines and cancellation.
-- `scripts/verify-package.ts`: build via npm pack, inspect tar contents, extract
-  below `.tmp/`, and load the packed ESM extension using the real Pi loader.
-- `package.json`: Pi package entry, dependencies, build and verification scripts.
-- `tsconfig*.json`, `biome.json`: strict TypeScript build and lint configuration.
-- `README.md`: scope, installation, implementation status and verification evidence.
-- `docs/verification.md`: observed acceptance evidence, HTTP 451 diagnosis,
-  successful explicit-proxy evaluation, limitations and reproduction commands.
-- `LICENSE`: MIT license. `package-lock.json`: reproducible dependency resolution.
-- `dist/`: generated package output; ignored. `.tmp/`, `outputs/`: local evidence;
-  ignored. Never stage dependencies, generated packages, credentials or artifacts.
-  `outputs/benchmark/` holds pinned data, Python environment, preview reports,
-  MOCK verification and future `runs/<id>/` evidence; `__pycache__/` is ignored.
-  `outputs/benchmark/live-preflight/` stores sanitized real API/account diagnostics,
-  distinct from full benchmark results. Direct API and native OAuth are different
-  paths; do not infer account model availability from LLM_BASE_URL's /models.
+## 项目目标和边界
 
-Data flow: `input` raw text -> `before_agent_start` complete catalog and two-level
-config -> fixed baseline -> blocking credential gate -> bounded shared state and independent Jev Noul questions
--> deadline/response validation -> selected original Skill objects (or explicit
-fallback) -> `systemPromptOptions.skills` -> Pi native formatter -> provider.
-Only assistant text is retained in extension-owned recent history; tool results,
-thinking, skill bodies and session custom entries are excluded. Session reload
-with existing messages is explicitly unsupported and skips routing. Diagnostics
-persist as `jev-skill-router` custom entries and `/skill-router-status` displays
-the latest report without raw task text or credentials.
-Catalog preparation produces a single request-local snapshot before the credential
-gate; its duration is passed to the router and consumes the same total deadline.
-Credential input/storage waiting does not consume that deadline. Reports include
-preparation, evaluator (SDK/network/parsing) and selection milliseconds; timeoutPhase
-distinguishes preparation/evaluation/total/batch. The user subsequently authorized
-full-catalog batching and asked to lower concurrency: it is fixed at 1. Every
-eligible candidate is scored once; partial results cannot become normal zero hits
-or selected results. Failure retains normal explicit fallback; missing keys and
-caller cancellation keep their blocking/cancellation behavior. No prefiltering.
-Per-attempt callbacks run synchronously after settlement and before the next call.
-The benchmark accounts/checkpoints actual dispatched HTTP attempts there; the final
-route report only summarizes them. Logical SDK attempts blocked before fetch are
-not counted as actual HTTP. Known partial costs survive failure; unknown usage and
-permanent HTTP errors still stop further budgeted traffic.
-The persistent SkillRet benchmark is an explicit user-authorized exception to
-unknown-usage stopping: unknown costs remain visible, full token totals and
-tokens-per-success stay unknown, and only known subtotals feed the token guard.
-Fresh retests require separate directories, start metadata with no imported old
-results, and independent psmux sessions. Preserve all earlier evidence unchanged.
-`/jev-skill apikey` saves the same credential used by the blocking gate to the user
-file; `apikey reset` removes the file and cache. It takes no plaintext key argument.
-`/jev-skill baseurl [URL|reset]` updates only
-the project `.pi/skill-router.json` endpoint; no argument opens an input dialog.
-Config mutations require an idle agent, send no model request and do not enter
-conversation history. `/jev-skill status` displays source/presence, never key values.
+- 正常用户请求只路由一次，工具续跑复用选择；每条新请求创建新的路径身份快照。固定路径和显式 `/skill:name` 优先，正文仍由 Pi 原生处理。
+- 成功零命中与服务失败不同。服务错误显式回退；缺 key、取消、无 UI 或保存失败阻塞/取消当前任务，不向聊天 provider 继续发送。凭据等待不计入路由 deadline。
+- 完整候选按 JSON 字节保护分批；同一查询批次串行，默认完成后间隔 1 秒。全部评分成功后统一筛选，不把部分覆盖伪装成正常结果。生产 SDK 重试为 0；BM25/向量预筛选尚未实现。
+- 默认准备/评估/总时限为 5/10/15 秒，单批 10 秒；48,000 字节 payload、24,000 字节 state+单题、128 批是本地保护，不是服务 Token 上界。较大目录需显式配置；不可静默延长操作者给出的 guard。
+- 不承诺运行中插话、接管加载扩展前的历史会话、其他 harness 或删除历史技能正文。扩展历史只留用户原文和助手可见文本，不读工具结果、思考或正文。
+- Jev 使用官方 SDK，默认显式模型 `jev-1.14.0`。key 优先 `TYPESAFE_API_KEY`，其次专用用户文件 `~/.jev-skill-router/credentials.json`，再交互输入。Windows DPAPI/POSIX 权限隔离；秘密不进入项目配置、会话、报告或命令参数，不自动落盘环境 key。退出只清内存。
+- Jev 地址顺序：项目配置 > 用户配置 > `TYPESAFE_BASE_URL` > 官方默认；SDK 接收 API 根地址，附加 `/v1/systemone`。地址不是代理。旧 `.pi/skill-router.json`、`/jev-skill`、`/skill-router-status`、会话类型 `jev-skill-router` 保持兼容。
+- 若新增通用大模型接口，优先 `LLM_API_KEY` / `LLM_BASE_URL` 和 OpenAI Chat Completions。现有真实 benchmark 必须使用 Pi 原生 OpenAI OAuth `gpt-6-luna` / `medium`，不能用通用地址或 API-key provider 替换；Jev 为独立服务。
+- 只记真实已派发 HTTP；批次尝试结算回调负责成本，最终报告不重复累加。保留失败前已知 usage；未知不是零，完整总量及 tokens/success 保持未知。缓存计一次，reasoning 是 output 子集，Token 不是账单。
+- `benchmark/parallel/` 协议 3 两组各有 N 个 worker（N=3/5），单查询批次仍串行；HTTP 首次加 5 次重试，共 6 次，5/10/20/40/80 秒加 0–20% 抖动，尊重 Retry-After、共享冷却、等待释放槽位。SDK 本身零重试。服务重试耗尽时 Pi 暂停两组，Jev 仅插件组；任务 guard 只暂停该任务。新恢复轮或追加预算需明确操作，重启不重置历史。旧协议 2 的不同规则见评测文档，不得混用。
+- 检查点只重放本实验语义匹配的成功响应；已完成查询不可再次调度。`coordinator.jsonl` 为权威日志，派生结果不代替它。源码迁移必须显式、停机并通过兼容门禁；不得自动篡改指纹或导入旧实验。
+- 当前两组运行已由用户停止并冻结，不自动恢复。原始 `outputs/benchmark/frozen/` 不修改、不入 Git。用户明确批准的 212 对查询精选派生包位于 `docs/benchmarks/2026-10-19-skillret-paused-212/`，主样本与 199 对完整用量子集分开报告；不是全量榜单或实际任务成功率。
+- SkillsBench 87 项中 `fix-druid-loophole-cve/verifier/test_outputs.py` 因 CVE 载荷被安全软件阻断（ID `A9E32DDD4DA1FF17`）。不自动恢复、解压或执行，不称已确认误报；保留 86 已核验+1 阻断和原始分母，完整 live 在付费调用前停止。
 
-## API conventions
+## 项目结构
 
-- Jev credentials prefer `TYPESAFE_API_KEY`; when missing in an interactive mode,
-  read the user credential file, otherwise await input and save it before routing.
-  Never copy environment credentials to disk automatically or write keys to project
-  configuration, process environment, conversation history, route state, reports or logs. TUI
-  input is masked; RPC rendering is controlled by the client. Empty input retries;
-  cancellation, missing UI, dialog errors and persistence failure block the task
-  with `missing_key`. Corrupt files can be repaired by entering a replacement;
-  never forward file contents, crypto subprocess output or raw errors. DPAPI
-  subprocesses are hidden, take secrets on stdin and never in command arguments.
-  Human input/file crypto time is outside the routing network deadline. Clear only
-  the memory cache on shutdown; keep the file. Non-interactive live evaluation
-  remains environment-only; Pi headless mode can use a previously saved credential.
-- Generic LLM integrations, if introduced later, prefer `LLM_API_KEY`,
-  `LLM_BASE_URL`, and OpenAI Chat Completions. V1 needs no generic LLM call.
-- Use the official TypeSafe JavaScript SDK. Zero retries; evaluator time is capped
-  by min(evaluationTimeoutMs, remaining routeTimeoutMs).
-- Live full-catalog diagnostics reached Jev and received HTTP 400 with
-  `detail.error_type=max_tokens_exceeded`. Official live docs confirm Jev 1.14
-  defaults to 64k per request and 32k for state plus any one question; there is no
-  separate question-count limit. The 262k long-context header is opt-in and has
-  documented speed/accuracy tradeoffs. It has not been enabled. Batching is now
-  implemented after solution A; prefiltering remains unimplemented. Serial calls
-  and spacing do not guarantee compliance with account-wide RPS/TPS limits or
-  prevent other processes from using the same organization's quota.
-- Jev Base URL precedence: project `baseUrl` > user `baseUrl` >
-  `TYPESAFE_BASE_URL` > `https://api.typesafe.ai`. Pass it as SDK `baseURL`;
-  the SDK appends `/v1/systemone`. This is a Jev API root, not a proxy setting.
-  Reject non-HTTP(S) URLs, embedded credentials, query parameters and fragments
-  without echoing invalid input. API key commands write only the dedicated user
-  credential file, never the environment. Status shows source and path, not key.
-- Default routing and evaluation model is explicitly `jev-1.14.0`, as requested
-  by the user. User/project `model` and evaluation `--model` may override it;
-  the SDK environment default must not silently replace the chosen version.
-- Compatibility baseline: `@earendil-works/pi-coding-agent@1.3.0`, specification
-  source commit `482c1381a00d8d00bc81697e4a980c593db6803e`.
+```text
+.
++-- src/
+|   +-- pi-adapter.ts          # Pi 生命周期、目录快照、诊断
+|   +-- selection.ts           # 路径身份、去重、固定项与预算选择
+|   +-- router.ts              # 凭据等待外的路由阶段与时限
+|   +-- batching.ts            # 完整候选装包、串行调度与评分合并
+|   +-- jev-client.ts          # 官方 SDK、响应校验和 usage
+|   +-- context.ts             # 原始输入、有界可见历史
+|   +-- config.ts              # 两层配置与默认值
+|   +-- commands.ts            # /jev-skill 与兼容命令
+|   +-- base-url.ts            # 地址校验、项目配置原子写入
+|   +-- credentials.ts         # 凭据门禁与内存缓存
+|   +-- credential-store.ts    # 用户文件、DPAPI/权限、原子写入
+|   `-- key-prompt.ts          # TUI/RPC 输入桥接
++-- eval/                      # 8 个合成用例、预览/显式 live、指标
++-- benchmark/
+|   +-- parallel/              # 协议 3 协调器、IPC、worker、时钟与恢复
+|   +-- sources.json           # 固定公开数据及工具版本
+|   +-- blocked-inputs.json    # 隔离任务记录
+|   +-- requirements*.txt      # Python 依赖锁定（另有 requirements.in）
+|   `-- README.md              # 准备、运行、协议 2/3、恢复操作
++-- tests/                     # 核心行为、真实 Pi/HTTP 边界、检查点
++-- scripts/
+|   +-- verify-package.ts      # npm 白名单与实际 Pi loader 检查
+|   +-- publish-snapshot.ts    # 精简导出、来源核对、离线复算
+|   `-- render-snapshot.py     # 新品牌 PNG/SVG，仅读精选汇总
++-- docs/
+|   +-- configuration.md       # 运行包包含的使用与配置文档
+|   +-- architecture.md        # 模块、数据流及兼容标识
+|   +-- development.md         # 开发验证、证据和分支约定
+|   +-- verification.md        # 历史验收与实测记录
+|   `-- benchmarks/2026-10-19-skillret-paused-212/
+|       +-- README.md          # 方法、结果、限制与复算说明
+|       +-- compact-evidence.jsonl
+|       +-- summary.json
+|       +-- paired-queries.csv
+|       +-- provenance.json    # 源版本与原始/精选文件哈希
+|       +-- comparison.png
+|       `-- comparison.svg
++-- .agents/skills/jev-skills-retrieval-dev/SKILL.md
++-- AGENTS.md
++-- README.md
++-- LICENSE
++-- package.json               # 包名、命令、Pi 入口和分发白名单
++-- package-lock.json
++-- tsconfig*.json             # 严格类型与生产构建配置
++-- biome.json
++-- .gitattributes             # 精选证据固定 LF，跨平台哈希一致
++-- dist/                      # 生成代码，忽略
++-- outputs/                   # 本地数据、环境、原始证据和包，忽略
+`-- .tmp/                      # 受检临时目录，忽略
+```
 
-## Verification and commits
+树展示主要职责；benchmark 内单次运行、数据准备、沙箱桥接和预检文件的完整说明见其 README。`dist/`、`outputs/`、`.tmp/`、依赖和凭据不得暂存；精选结果是本次明确批准的 Git 交付例外。
 
-- `npm ci`: install the locked dependencies.
-- `npm run check`: typecheck, Biome lint, meaningful tests, and production build.
-- `npm run format`: apply formatting and organize imports.
-- `npm run eval`: preview the bounded synthetic suite without network calls.
-- `npm run benchmark:prepare`: download full pinned public test inputs; no model.
-- `npm run benchmark:preflight`: offline full input/hash/native-discovery audit;
-  reports security-blocked inputs and returns exit 2 when not all tasks are ready.
-- `npm run benchmark`: empty/preview report by default; no model calls. Explicit
-  `--live` requires positive HTTP/token/turn/output/time guards, TYPESAFE_API_KEY
-  and Pi's existing OpenAI OAuth account. User clarified the CLI label as provider
-  `openai`, model `gpt-6-luna`, thinking `medium`; use native Responses/account
-  routing, separately from Jev 1.14. No silent provider/model substitution.
-  Actual HTTP requests are capped before fetch. Tokens are an observed response
-  boundary stop, not a strict monetary cap; unknown usage stops further requests.
-  Preserve raw trial evidence and coverage; mock/empty charts are labelled clearly.
-  `pwsh -NoProfile -File benchmark/psmux.ps1 -Output runs/<fresh-id> -Namespace
-  <unique-namespace> -Session <unique-session>` starts a fresh detached full
-  SkillRet two-group run with the authorized persistent retry policy. It refuses
-  existing output/session names. Attach with `psmux -L <namespace> attach -t
-  <session>`; check `progress.json`, `active-trial.json`, trial `partial.json`,
-  `checkpoint/` and `psmux-console.log`. `psmux-exit.json` records process exit;
-  a live pane alone is not evidence that the benchmark process is running.
-  `tests/checkpoint.test.ts` covers paid-response replay, unknown retries/restart,
-  exhausted attempt persistence, cache/reasoning accounting, journal repair and
-  concurrent-writer exclusion. Pi HTTP-boundary tests cover durable Responses
-  and Completions accounting with fake providers, without real account access.
-- `npm run benchmark:verify`: explicit harmless Docker/BenchFlow/Pi integration
-  using loopback fake providers, no public CVE tasks and no real model calls.
-  Python dependency setup and resume/report commands are in benchmark/README.md.
-- `pwsh -NoProfile -File benchmark/parallel/start.ps1 -Output parallel/<fresh-id>`:
-  explicitly authorized live parallel pipeline. Creates two independent psmux
-  sessions plus a hidden coordinator; calibrates before automatic fresh full run.
-  `npm run benchmark:parallel -- --output parallel/<id> --status` reads live IPC;
-  `--stop` closes admission and cancels active trials while preserving evidence.
-  `--resume-provider pi|jev --new-cycle` is explicit manual retry authorization;
-  `--extend-job <group/query> --work-minutes N --route-minutes N --online-minutes N`
-  appends paused-task guards. `start.ps1 -Resume` restarts coordinator fail-closed;
-  stop old workers, use `--recover-infrastructure`, then explicitly restart each
-  group worker in its existing session. No automatic recovery loop resets limits.
-  Full instructions and root/phase output identities are in benchmark/README.md.
-- `npm run benchmark:check`: locked Python Ruff checks/formatting and meaningful
-  no-network preparation/compatibility/verifier-failure tests in the dedicated Python environment.
-- `npm run eval -- --live`: paid Jev evaluation with `TYPESAFE_API_KEY`; default
-  at most 8 requests, no retries, 3 seconds each. Stops on permanent HTTP 4xx.
-- `npm run eval -- --live --output outputs/evaluation.json`: evidence output path;
-  `--repeat 1..20`, `--model`, `--threshold`, `--timeout-ms` configure calibration.
-- Explicit proxy diagnosis used process-local Undici `ProxyAgent` bound to
-  `http://127.0.0.1:7688`, with no direct fallback. Reproduction is documented in
-  `docs/verification.md`; evidence is in `outputs/proxy-7688-probe.json` and
-  `outputs/evaluation-proxy-7688.json`; the requested `jev-1.14.0` evaluation is
-  in `outputs/evaluation-jev-1.14.0-proxy-7688.json`. The default extension does not yet enable
-  a proxy automatically. Do not confuse sandbox elevation with proxy routing.
-- `npm pack --dry-run`: inspect package contents (runs the build).
-- `npm run verify:package`: build and create `outputs/jev-skill-router-0.1.0.tgz`,
-  validate packaged files, and load the extracted extension in Pi without an API call.
-  Needs system `tar`; temporary extraction is removed after verification.
-- Integration tests must inspect actual Pi provider requests, not only arrays.
-  They bind a temporary loopback HTTP server; restricted environments may need
-  permission for local networking. Tests never need real provider credentials.
-- With added/deleted/moved files, module/data-flow changes, or changed commands or
-  output paths, synchronize this project-level AGENTS.md in the same change.
-- Finish one functional milestone, handle failures, synchronize docs, pass checks,
-  inspect `git status --short`, `git diff`, and `git diff --cached`, then commit.
-- Stage only the current milestone. Use Conventional Commits; never claim a
-  blocked check passed. Do not mix independent changes into one commit.
+### 数据流
 
-## Tools and responses
+```mermaid
+flowchart TD
+  A["原始输入 + Pi 完整目录 + 两层配置"] --> B["before_agent_start 请求内身份快照"]
+  B --> C["固定项与阻塞凭据门禁"]
+  C -->|"缺 key 或取消"| X["停止当前任务"]
+  C --> D["原始问题 + 有界可见历史"]
+  D --> E["完整候选按 JSON 字节分批"]
+  E --> F["Jev 串行独立 Noul 评分"]
+  F --> G["完整校验、合并、阈值和预算"]
+  F -->|"服务失败或超时"| H["显式回退并保留有效固定项"]
+  G --> I["选中原始 Skill 对象 + 固定项"]
+  H --> J["Pi 原生 formatter 与 provider"]
+  I --> J
+  J --> K["原生读取正文；工具续跑复用选择"]
+  F --> L["实际 HTTP 尝试结算及脱敏诊断"]
+```
 
-Use Context7 for current library/API/CLI docs; use Tavily for web evidence where
-needed. Prefer official sources. Use answer-me-with-html for conclusions and
-delivery summaries, 2–4 panels, rendered with `--no-open`; link the absolute page
-path at the end. Explicit plain-text requests and trivial nonconclusions are exempt.
+## 开发命令
+
+| 命令 | 职责 |
+| --- | --- |
+| `npm ci` | 锁定依赖安装 |
+| `npm run check` | 类型、Biome、测试、生产构建，无线上调用 |
+| `npm run format` | 格式与 import 整理 |
+| `npm run verify:package` | 本地打包及真实 Pi loader 验证；输出 `outputs/jev-skills-retrieval-0.1.0.tgz` |
+| `npm run results:verify` | 离线核验精选证据、哈希、212/199 汇总和 CSV |
+| `python scripts/render-snapshot.py` | 使用锁定 Python 环境生成精选结果 PNG/SVG |
+| `npm run eval` / `npm run benchmark` | 默认预览，不调用模型 |
+| `npm run benchmark:prepare` | 下载固定公开数据，不调用模型 |
+| `npm run benchmark:preflight` | 离线全量审计，安全阻断时返回 2 |
+| `npm run benchmark:check` | 专用 Python 环境中的 Ruff 与回归测试 |
+| `npm run benchmark:verify` | 显式无害 Docker 集成，使用假 provider |
+
+真实 `--live` 和 parallel 启动/恢复命令、guard、依赖安装见 [benchmark/README.md](benchmark/README.md)，不要在常规验证中启动。导出精选结果用 `node --import tsx scripts/publish-snapshot.ts --source <冻结目录> --write`，只写精选派生目录；默认无参数为只读核验。Python 环境与图表命令见结果包说明。
+
+## 项目结构同步规则
+
+任何新增、删除、移动、重命名文件/目录，或职责、模块边界、入口、数据流、测试/构建/验证命令、交付路径变化，都必须在同一修改中同步本文件相应树、图、命令和边界。README 保持简洁，文档拆分后同步相对链接。
+
+完成一轮功能闭环并通过有意义的测试与 Lint 后及时提交。提交前检查 `git status --short`、`git diff`、`git diff --cached`；仅暂存本轮内容，不混入他人改动、凭据、依赖和生成产物。无法执行的必要验证必须说明阻塞，不得声称已通过。
+
+提交使用 Conventional Commits：`<type>(<scope>): <具体结果>`。范围可省略；type 使用 feat/fix/refactor/test/docs/build/ci/chore/perf。互不相关的功能不堆入一个提交。本轮明确上传至 `https://github.com/aimmetal-tech/jev-skills-retrieval` 的 **dev**，保留已有历史，不强推，不发布 npm；main 后续另行处理。
+
+库/API/CLI 文档优先 Context7；需要联网证据时优先 Tavily，按来源核实并附链接。结论、总结、计划、比较、评审或解释使用 answer-me-with-html 附 2–4 面板页面，先以 `--no-open` 渲染，回复末尾给出宿主支持的绝对路径 Markdown 链接。闲聊、纯命令输出和用户明确纯文本时豁免。

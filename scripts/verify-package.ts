@@ -29,11 +29,18 @@ assert(archive.files.some((file) => file.path === "dist/pi-adapter.js"));
 assert(archive.files.some((file) => file.path === "dist/pi-adapter.d.ts"));
 assert(
   !archive.files.some((file) =>
-    /^(?:src|tests|eval|outputs|node_modules|\.env|\.git)(?:\/|$)/.test(
+    /^(?:src|tests|eval|benchmark|scripts|outputs|node_modules|\.agents|\.env|\.git)(?:\/|$)/.test(
       file.path,
     ),
   ),
 );
+assert(
+  archive.files
+    .filter((file) => file.path.startsWith("docs/"))
+    .every((file) => file.path === "docs/configuration.md"),
+  "Development documents and benchmark results must stay out of the runtime package",
+);
+assert(archive.files.some((file) => file.path === "docs/configuration.md"));
 const archivePath = resolve(output, archive.filename);
 assert(
   archivePath.startsWith(`${output}${sep}`),
@@ -47,6 +54,7 @@ try {
   const manifest = JSON.parse(
     await readFile(join(packageRoot, "package.json"), "utf8"),
   );
+  assert.equal(manifest.name, "jev-skills-retrieval");
   assert.equal(manifest.dependencies["@typesafe-ai/sdk"], "0.7.0");
   assert.deepEqual(manifest.pi.extensions, ["./dist/pi-adapter.js"]);
   const loader = new DefaultResourceLoader({

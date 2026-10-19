@@ -32,7 +32,7 @@ def render(output):
         {"font.size": 10, "axes.spines.top": False, "axes.spines.right": False}
     )
     fig, axes = plt.subplots(2, 2, figsize=(13, 8), layout="constrained")
-    fig.suptitle(title, fontsize=17, fontweight="bold")
+    fig.suptitle(f"Jev Skills Retrieval — {title}", fontsize=17, fontweight="bold")
 
     def bars(ax, suite, metric, caption, percent=False):
         for x, group in enumerate(("native", "router")):
@@ -55,7 +55,7 @@ def render(output):
                     labels=[f"{shown:.1f}%" if percent else f"{shown:,.0f}"],
                     padding=4,
                 )
-        ax.set_xticks([0, 1], ["Pi native", "With router"])
+        ax.set_xticks([0, 1], ["Pi native", "Pi + Jev Skills Retrieval"])
         ax.set_title(caption, loc="left", fontweight="bold")
         ax.set_xlim(-0.6, 1.6)
         if percent:

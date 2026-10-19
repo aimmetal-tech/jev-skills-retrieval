@@ -21,8 +21,27 @@ export function retrieval(
   };
 }
 
+// Curated bundles retain only the evidence fields consumed by these metrics.
+export type SummaryTrial = Pick<
+  Trial,
+  | "suite"
+  | "group"
+  | "selectedIds"
+  | "relevantIds"
+  | "status"
+  | "pi"
+  | "jev"
+  | "recovery"
+  | "taskSuccess"
+  | "verifierStatus"
+  | "elapsedMs"
+> & {
+  reads: Pick<Trial["reads"][number], "id">[];
+  routeReports: Pick<Trial["routeReports"][number], "status">[];
+};
+
 export function summarizeTrials(
-  rows: Trial[],
+  rows: SummaryTrial[],
   expectedPerGroup: Record<string, number>,
 ) {
   return ["skillret", "skillsbench"].flatMap((suite) =>
