@@ -110,6 +110,7 @@ async function boundary(
   batched = false,
   unknownJev = false,
   durable = false,
+  maxTurns = limits.maxTurns,
 ) {
   const root = await mkdtemp(resolve(tmpdir(), "jev-benchmark-"));
   const payloads: string[] = [];
@@ -210,7 +211,7 @@ async function boundary(
       ),
     ),
   );
-  const budget = new Budget({ ...limits, maxRequests: requestCap });
+  const budget = new Budget({ ...limits, maxRequests: requestCap, maxTurns });
   try {
     const checkpoint = resolve(root, "partial.json");
     const row = await runPiTrial({
@@ -294,6 +295,23 @@ test("benchmark launches real Pi with and without plugin; captures wire prompts,
     assert.match(result.payloads[1] ?? "", /BODY_ALPHA/);
     assert.deepEqual(result.row.responseModels, ["mock-response"]);
   }
+});
+
+test("Pi turn guard survives abort/error events without another HTTP request", async () => {
+  const result = await boundary(
+    "native",
+    10,
+    true,
+    false,
+    false,
+    false,
+    false,
+    1,
+  );
+  assert.equal(result.piCalls, 1);
+  assert.equal(result.row.requests.pi, 1);
+  assert.equal(result.row.status, "budget");
+  assert.equal(result.row.failure, "turn_limit");
 });
 
 test("Pi continuation is stopped by the HTTP cap, missing usage stays unknown, and labels cannot be read", async () => {

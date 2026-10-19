@@ -83,7 +83,10 @@ export async function worker(root: string, group: Group) {
       )
         throw new Error("worker_phase_invalid");
       const { fingerprint } = await import("./pipeline.ts");
-      if ((await fingerprint()).digest !== spec.fingerprint)
+      if (
+        (await fingerprint()).digest !==
+        (spec.runtimeFingerprint ?? spec.fingerprint)
+      )
         throw new Error("worker_code_fingerprint_mismatch");
       if (group === "router" && !process.env.TYPESAFE_API_KEY?.trim())
         throw new Error("router_requires_typesafe_key");
@@ -150,7 +153,7 @@ export async function worker(root: string, group: Group) {
                 onReport: (report) => {
                   checkpoint.routing(false);
                   if (report.status !== "selected")
-                    checkpoint.pause("service:jev");
+                    checkpoint.pause(`route:${report.reason ?? report.status}`);
                 },
               },
             });
@@ -172,9 +175,11 @@ export async function worker(root: string, group: Group) {
                 await call({
                   op: "job-paused",
                   job: job.key,
-                  reason: "service:pi",
+                  reason: String(result.paused).startsWith("guard:")
+                    ? String(result.paused)
+                    : "service:pi",
                 });
-                console.error(`PAUSED ${spec.id}/${job.key}: trial_error`);
+                console.error(`PAUSED ${spec.id}/${job.key}: ${result.paused}`);
               } else {
                 atomicJson(resolve(trialDir, "partial.json"), row);
                 console.log(

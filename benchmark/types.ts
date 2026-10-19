@@ -54,7 +54,7 @@ export interface Trial {
     | "budget"
     | "harness_error";
   httpStatus: number | null;
-  failure?: "context_limit" | "provider_error";
+  failure?: "context_limit" | "provider_error" | "turn_limit";
   providerPayloadBytes?: number;
   elapsedMs: number;
   catalogCount: number;

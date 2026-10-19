@@ -148,9 +148,28 @@ to `~/.jev-skill-router/credentials.json`; never to project config or session da
   qualified; 3=158.24 trials/h, 5=273.20 trials/h, so full-5 started automatically.
   Root calibration-verification.json/selection.json and calibration-throughput
   PNG/SVG preserve the measured choice, separately from full accuracy results.
-  Frozen parallel source is bb2391e, archived under source-archives; later evidence
-  documentation does not alter the frozen source fingerprint. Formal attempts
-  retain unknown costs even after a successful retry.
+  Original parallel source is bb2391e, archived under source-archives. On
+  2026-10-19 the user explicitly authorized repairing the harness and continuing
+  the same run without retesting completed queries. `resume.ts` provides explicit
+  offline `--upgrade-runtime-from <old-digest>` migration after the coordinator
+  and both workers stop. A narrow file-level compatibility gate and unchanged
+  policy/limits reject plugin/data/dependency changes; reviewed guard/resume-only
+  changes preserve original PhaseSpec.fingerprint checkpoint scopes. The new
+  optional runtimeFingerprint validates repaired worker source. Backups and exact
+  old/new hashes/commits are stored in runtime-upgrades; calibration stays intact.
+  Never silently rewrite scopes, discard results or import another experiment.
+  IPC now has a separate 60s local deadline and yields ready I/O before timeout;
+  replay yields I/O, while actual Jev10s/Pi120s limits are unchanged. Pi turn-limit
+  status survives abort errors, and guard/context/timeout outcomes pause only the
+  affected task. They do not fabricate completion or pause the provider. Real
+  provider pauses retain their source across Jev admission; worker pools persist
+  while paused and replace temporary serial-recovery/handoff scripts. Completed
+  jobs are immutable and never returned by next, including after recovery.
+  Status running:task_paused distinguishes held guard tasks from a provider-wide
+  pause while other queries continue; paused:tasks means only held tasks remain.
+  Formal attempts retain unknown costs even after a successful retry. Report
+  notes disclose harness upgrades and recovery latency; do not merge these into
+  homogeneous calibration throughput claims.
   Legacy protocol 2 (separate from the new parallel protocol above): the user
   explicitly authorized unknown-cost recording followed by bounded backoff
   retries in this persistent benchmark: `--continue-unknown-usage` retains unknown

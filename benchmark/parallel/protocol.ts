@@ -29,6 +29,8 @@ export interface PhaseSpec {
   version: 3;
   id: string;
   fingerprint: string;
+  /** Explicitly audited harness-only upgrade; original checkpoint scope stays fixed. */
+  runtimeFingerprint?: string;
   concurrency: 3 | 5;
   queryIds: string[];
   kind: "calibration" | "full";

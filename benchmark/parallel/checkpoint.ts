@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
+import {
+  setTimeout as delay,
+  setImmediate as yieldToIO,
+} from "node:timers/promises";
 import { gunzipSync, zstdDecompressSync } from "node:zlib";
 import {
   atomicJson,
@@ -154,6 +157,7 @@ export class ParallelCheckpoint implements TrialDurability {
             (this.policy.backoffMs[Math.min(current.length - 1, 4)] ?? 80000);
       }
       this.saveReceipt(r);
+      await yieldToIO();
     }
     this.timer = setInterval(() => {
       try {
@@ -318,6 +322,9 @@ export class ParallelCheckpoint implements TrialDurability {
         throw new Error("parallel_request_mismatch");
       }
       if (r?.response) {
+        await yieldToIO();
+        if (this.checkLimits() || init?.signal?.aborted)
+          throw new Error("parallel_trial_paused");
         this.replayed[provider]++;
         this.persist();
         this.onChange?.();
@@ -381,7 +388,11 @@ export class ParallelCheckpoint implements TrialDurability {
             throw new Error("parallel_coordinator_unavailable");
           }
           if (grant.paused) {
-            this.pause(`service:${provider}`);
+            this.pause(
+              grant.pausedProvider === "pi" || grant.pausedProvider === "jev"
+                ? `service:${grant.pausedProvider}`
+                : `infrastructure:${String(grant.paused)}`,
+            );
             throw new Error("parallel_provider_paused");
           }
           if (grant.granted) break;

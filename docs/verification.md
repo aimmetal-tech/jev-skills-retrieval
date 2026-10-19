@@ -392,3 +392,21 @@ Pi实际返回模型均为gpt-6-luna，OAuth/Responses/medium保持一致；Jev�
 原失败用量仍未知并保留，不因重试成功归零。正式轮当时继续运行、没有熔断；
 后续状态应读取实时pipeline.json与full-5/progress.json，不能把本次启动验收当作全量完成。
 旧三个运行的results.jsonl哈希再次核对，全部未变，记录见isolation-verification.json。
+
+### 同轮保护与续跑修复（2026-10-19）
+
+用户明确要求修复并继续两组，已完成查询不得重测。修复前保存本轮586条已完成查询的
+结果/partial哈希与11303次预留账本边界，位于 `before-fix-preservation.json`。
+轮数超限曾被后续abort错误覆盖为provider_error，进而全局暂停Pi；Jev准入又将共享Pi
+暂停误标service:jev。临时串行恢复脚本将暂停作为未捕获异常退出，因而未完成自动交接。
+
+正式worker现在保留turn_limit，预算/时间/上下文保护只暂停单项，真实服务暂停保留来源。
+本地IPC独立提升到60秒，回放主动让出I/O；生产Jev和Pi HTTP超时、重试和推理配置不变。
+显式源码升级入口停止旧进程后备份manifest，记录新旧哈希/提交；原检查点身份和已完成结果
+不变，新源码另用runtimeFingerprint校验。常规恢复仍拒绝指纹不匹配；升级不导入其他运行。
+正式worker负责后续持久暂停与恢复，临时恢复/交接脚本不再使用。
+
+新增真实Pi假服务回归验证轮数超限后不再发HTTP且保留budget/turn_limit；IPC测试验证
+独立截止与取消；协调器测试验证局部保护、跨服务暂停来源、已完成任务不可重排，以及
+停止后仅重新排队可恢复中断。升级回归验证检查点身份保留、源文件/预算变化拒绝和备份。
+完整 `npm run check` 的98项测试、类型、Lint和构建通过；真实续跑验收另存本轮outputs。

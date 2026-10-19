@@ -21,7 +21,13 @@ import {
   type RpcRequest,
   selectQueries,
 } from "./protocol.ts";
-import { phaseReport, qualification, selectConcurrency } from "./reporting.ts";
+import {
+  executionStatus,
+  phaseReport,
+  qualification,
+  selectConcurrency,
+} from "./reporting.ts";
+import { upgradePausedPipeline } from "./resume.ts";
 
 const project = resolve(import.meta.dirname, "../..");
 const outputRoot = resolve(project, "outputs/benchmark");
@@ -298,18 +304,10 @@ export async function pipeline(
       coordinator.checkOwners();
       coordinator.saveStatus();
       const sum = coordinator.summary();
-      const jobPaused = [...coordinator.jobs.values()].some(
-        (j) => j.state === "paused",
-      );
       if (!stopping)
         manifest.status = blocked
           ? `paused:${blocked}`
-          : sum.fatal ||
-              Object.keys(sum.pauses).length ||
-              jobPaused ||
-              sum.offlineGroups.length
-            ? "paused"
-            : "running";
+          : executionStatus(coordinator);
       if (
         Date.now() - Date.parse(manifest.phaseStartedAt) > 120000 &&
         coordinator.workers.size < 2
@@ -461,6 +459,7 @@ export async function main() {
       "route-minutes": { type: "string" },
       "online-minutes": { type: "string" },
       "calibration-only": { type: "boolean" },
+      "upgrade-runtime-from": { type: "string" },
     },
     strict: true,
   });
@@ -468,6 +467,27 @@ export async function main() {
   const root = contained(outputRoot, values.output);
   if (root === outputRoot)
     throw new Error("specific_pipeline_directory_required");
+  if (values["upgrade-runtime-from"]) {
+    const git = spawnSync("git", ["rev-parse", "HEAD"], {
+      cwd: project,
+      windowsHide: true,
+      encoding: "utf8",
+    });
+    if (git.status !== 0) throw new Error("upgrade_commit_required");
+    console.log(
+      JSON.stringify(
+        await upgradePausedPipeline(
+          root,
+          await fingerprint(),
+          values["upgrade-runtime-from"],
+          git.stdout.trim(),
+        ),
+        null,
+        2,
+      ),
+    );
+    return;
+  }
   let request: RpcRequest | undefined;
   if (values.status) request = { op: "status" };
   if (values.stop) request = { op: "operator-stop" };

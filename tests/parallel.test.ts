@@ -1,23 +1,37 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { appendFile, mkdtemp, readFile, rm } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { test } from "node:test";
 import { ParallelCheckpoint } from "../benchmark/parallel/checkpoint.ts";
 import { Coordinator } from "../benchmark/parallel/coordinator.ts";
-import { rpc, serve, socketPath } from "../benchmark/parallel/ipc.ts";
+import {
+  IPC_TIMEOUT_MS,
+  rpc,
+  serve,
+  socketPath,
+} from "../benchmark/parallel/ipc.ts";
 import {
   type AttemptRecord,
   type JobRecord,
+  PARALLEL_LIMITS,
   type PhaseSpec,
   POLICY,
   type RpcRequest,
   selectQueries,
 } from "../benchmark/parallel/protocol.ts";
-import { selectConcurrency } from "../benchmark/parallel/reporting.ts";
+import {
+  executionStatus,
+  selectConcurrency,
+} from "../benchmark/parallel/reporting.ts";
+import {
+  planRuntimeUpgrade,
+  upgradePausedPipeline,
+} from "../benchmark/parallel/resume.ts";
 import { TrialClock } from "../benchmark/parallel/timing.ts";
-import { emptyCounts, type Group } from "../benchmark/types.ts";
+import { emptyCounts, type Group, type Trial } from "../benchmark/types.ts";
 
 const spec: PhaseSpec = {
   version: 3,
@@ -239,6 +253,10 @@ test("durable real responses replay without HTTP or double charge, mismatched in
     first.close();
     const second = new ParallelCheckpoint(dir, "scope", job, f.call("native"));
     await second.initialize();
+    let yielded = false;
+    setImmediate(() => {
+      yielded = true;
+    });
     await second.fetch("pi", async () => {
       throw new Error("No network");
     })("http://fixture.invalid", {
@@ -246,6 +264,7 @@ test("durable real responses replay without HTTP or double charge, mismatched in
       body: '{"model":"fixture","prompt_cache_key":"second"}',
     });
     assert.equal(second.stats().replayed.pi, 1);
+    assert.equal(yielded, true);
     assert.equal(f.c.attempts.size, 1);
     assert.equal(f.c.knownTokens, 12);
     second.close();
@@ -267,6 +286,194 @@ test("durable real responses replay without HTTP or double charge, mismatched in
     mismatch.close();
   } finally {
     await f.close();
+  }
+});
+
+test("task guards do not pause providers, completed jobs stay immutable, Pi pauses retain their source in Jev admission", async () => {
+  const f = await fixture();
+  try {
+    const call = f.call("native");
+    const first = (await call({ op: "next" })).job as JobRecord;
+    const row: Trial = {
+      schemaVersion: 1,
+      suite: "skillret",
+      caseId: first.caseId,
+      group: "native",
+      evidence: "mock",
+      model: "fixture",
+      responseModels: [],
+      status: "budget",
+      failure: "turn_limit",
+      httpStatus: null,
+      elapsedMs: 1,
+      catalogCount: 1,
+      selectedIds: [],
+      reads: [],
+      relevantIds: [],
+      routeReports: [],
+      pi: emptyCounts(),
+      jev: emptyCounts(),
+      requests: { pi: 0, jev: 0 },
+      taskSuccess: null,
+      verifierStatus: "not_applicable",
+    };
+    assert.equal(
+      (await call({ op: "complete", job: first.key, row })).paused,
+      "guard:turn_limit",
+    );
+    assert.deepEqual(f.c.pauses, {});
+    assert.equal(executionStatus(f.c), "running:task_paused");
+    const second = (await call({ op: "next" })).job as JobRecord;
+    assert.notEqual(second.key, first.key);
+    await call({
+      op: "complete",
+      job: second.key,
+      row: {
+        ...row,
+        caseId: second.caseId,
+        status: "completed",
+        failure: undefined,
+      },
+    });
+    await call({ op: "job-paused", job: second.key, reason: "service:pi" });
+    assert.equal(f.c.jobs.get(second.key)?.state, "completed");
+    const third = (await call({ op: "next" })).job as JobRecord;
+    assert.notEqual(third.key, second.key);
+    const router = (await f.call("router")({ op: "next" })).job as JobRecord;
+    const cp = new ParallelCheckpoint(
+      resolve(f.root, "source"),
+      "scope",
+      router,
+      f.call("router"),
+    );
+    await cp.initialize();
+    f.c.pause("pi", "provider_test_pause");
+    assert.equal(executionStatus(f.c), "paused");
+    let calls = 0;
+    await assert.rejects(
+      cp.fetch("jev", async () => {
+        calls++;
+        return Response.json({});
+      })("http://fixture.invalid", { method: "POST", body: "{}" }),
+      /provider_paused/,
+    );
+    assert.equal(cp.shouldPause(), "service:pi");
+    assert.equal(calls, 0);
+    assert.equal(f.c.pauses.jev, undefined);
+    cp.close();
+    await call({ op: "job-paused", job: third.key, reason: "operator:stop" });
+    const dead = spawnSync(process.execPath, ["-e", ""], { windowsHide: true });
+    assert.equal(dead.status, 0);
+    for (const group of ["native", "router"] as Group[])
+      f.c.workers.set(group, { pid: dead.pid, epoch: 1 });
+    f.c.recoverInfrastructure();
+    assert.equal(f.c.jobs.get(third.key)?.state, "queued");
+    assert.equal(f.c.jobs.get(first.key)?.state, "paused");
+    assert.equal(f.c.jobs.get(second.key)?.state, "completed");
+  } finally {
+    await f.close();
+  }
+});
+
+test("IPC timeout is independent of provider guards and remains cancellable", async () => {
+  assert.equal(IPC_TIMEOUT_MS, 60000);
+  assert.equal(POLICY.jevTimeoutMs, 10000);
+  assert.equal(POLICY.piTimeoutMs, 120000);
+  const root = await mkdtemp(resolve(tmpdir(), "jev-ipc-timeout-"));
+  const server = await serve(socketPath(root), async () => {
+    await new Promise((done) => setTimeout(done, 80));
+    return { ok: true };
+  });
+  try {
+    await assert.rejects(
+      rpc(socketPath(root), { op: "fixture" }, undefined, 15),
+      /unavailable/,
+    );
+    assert.equal(
+      (await rpc(socketPath(root), { op: "fixture" }, undefined, 500)).ok,
+      true,
+    );
+    const controller = new AbortController();
+    controller.abort();
+    await assert.rejects(
+      rpc(socketPath(root), { op: "fixture" }, controller.signal),
+      /cancelled/,
+    );
+  } finally {
+    await new Promise<void>((done) => server.close(() => done()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("explicit stopped-runtime upgrade preserves checkpoint scopes and refuses data/provider/budget changes or live owners", async () => {
+  const root = await mkdtemp(resolve(tmpdir(), "jev-runtime-upgrade-"));
+  const before = {
+    version: 3,
+    fingerprint: {
+      digest: "old",
+      files: { "benchmark/pi.ts": "a", "src/router.ts": "fixed" },
+    },
+    phases: [{ ...spec, kind: "full" as const, fingerprint: "old" }],
+    phaseIndex: 0,
+    status: "paused",
+    policy: POLICY,
+    limits: PARALLEL_LIMITS,
+    codeCommit: "old-commit",
+    current: { uncertainReservations: 0 },
+  };
+  const code = {
+    digest: "new",
+    files: { "benchmark/pi.ts": "b", "src/router.ts": "fixed" },
+  };
+  try {
+    const plan = planRuntimeUpgrade(before, code, "old", "new-commit");
+    assert.equal(plan.next.phases[0]?.fingerprint, "old");
+    assert.equal(plan.next.phases[0]?.runtimeFingerprint, "new");
+    assert.deepEqual(plan.next.phases[0]?.queryIds, before.phases[0]?.queryIds);
+    assert.throws(
+      () =>
+        planRuntimeUpgrade(
+          before,
+          { ...code, files: { ...code.files, "src/router.ts": "changed" } },
+          "old",
+          "new",
+        ),
+      /changes_experiment/,
+    );
+    assert.throws(
+      () =>
+        planRuntimeUpgrade(
+          { ...before, limits: { ...PARALLEL_LIMITS, maxTurns: 13 } },
+          code,
+          "old",
+          "new",
+        ),
+      /incompatible/,
+    );
+    await writeFile(
+      resolve(root, "pipeline.json"),
+      JSON.stringify({ ...before, coordinatorPid: process.pid }),
+    );
+    await assert.rejects(
+      upgradePausedPipeline(root, code, "old", "new"),
+      /stop_processes/,
+    );
+    await writeFile(resolve(root, "pipeline.json"), JSON.stringify(before));
+    const outcome = await upgradePausedPipeline(root, code, "old", "new");
+    assert.equal(outcome.upgraded, true);
+    assert.equal(
+      JSON.parse(await readFile(resolve(root, "pipeline.json"), "utf8"))
+        .fingerprint.digest,
+      "new",
+    );
+    assert.equal(
+      JSON.parse(
+        await readFile(resolve(outcome.backup, "pipeline.before.json"), "utf8"),
+      ).fingerprint.digest,
+      "old",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
 test("work, queue, backoff and cooldown clocks are disjoint; offline does not erase accrued time", () => {

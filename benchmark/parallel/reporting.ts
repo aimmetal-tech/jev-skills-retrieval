@@ -5,6 +5,22 @@ import { writeReport } from "../run.ts";
 import { emptyCounts, type Trial } from "../types.ts";
 import type { Coordinator } from "./coordinator.ts";
 
+export function executionStatus(coordinator: Coordinator) {
+  const summary = coordinator.summary();
+  if (
+    coordinator.fatal ||
+    Object.keys(coordinator.pauses).length ||
+    summary.offlineGroups.length
+  )
+    return "paused";
+  const jobs = [...coordinator.jobs.values()];
+  if (jobs.some((j) => j.state === "paused"))
+    return jobs.some((j) => j.state === "queued" || j.state === "running")
+      ? "running:task_paused"
+      : "paused:tasks";
+  return summary.completed === summary.expected ? "complete" : "running";
+}
+
 export async function phaseReport(coordinator: Coordinator) {
   const rows = coordinator.rows();
   for (const job of coordinator.jobs.values())
@@ -63,17 +79,16 @@ export async function phaseReport(coordinator: Coordinator) {
       ...summary.notes,
       "Running/paused trials are provisional and contribute their observed costs, not successes",
       "All evidence belongs to this phase only; no old run or calibration response imports",
+      ...(coordinator.spec.runtimeFingerprint
+        ? [
+            "Harness runtime upgraded in place; original checkpoint identities and completed results retained. See pipeline runtime-upgrades for source revisions; recovery latency is not homogeneous calibration evidence.",
+          ]
+        : []),
     ],
   });
   atomicJson(resolve(coordinator.directory, "run.json"), {
     ...coordinator.spec,
-    status:
-      coordinator.fatal || Object.keys(coordinator.pauses).length
-        ? "paused"
-        : rows.filter((r) => r.status === "completed").length ===
-            coordinator.jobs.size
-          ? "complete"
-          : "running",
+    status: executionStatus(coordinator),
     expectedPerGroup: {
       skillret: coordinator.spec.queryIds.length,
       skillsbench: 0,

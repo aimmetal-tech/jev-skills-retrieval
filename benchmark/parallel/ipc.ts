@@ -3,6 +3,10 @@ import { resolve } from "node:path";
 import type { RpcReply, RpcRequest } from "./protocol.ts";
 import { digest } from "./protocol.ts";
 
+// Local catalog construction/replay can block the event loop longer than 10s.
+// This is independent of the Jev/Pi HTTP deadlines (10s/120s).
+export const IPC_TIMEOUT_MS = 60000;
+
 export const socketPath = (root: string) =>
   process.platform === "win32"
     ? `\\\\.\\pipe\\jev-benchmark-${digest(resolve(root).toLowerCase()).slice(0, 32)}`
@@ -11,6 +15,7 @@ export function rpc(
   path: string,
   request: RpcRequest,
   signal?: AbortSignal,
+  timeoutMs = IPC_TIMEOUT_MS,
 ): Promise<RpcReply> {
   return new Promise((done, reject) => {
     const socket = createConnection(path);
@@ -27,8 +32,10 @@ export function rpc(
     };
     const abort = () => finish(new Error("coordinator_request_cancelled"));
     const timer = setTimeout(
-      () => finish(new Error("coordinator_unavailable")),
-      10000,
+      // Give a ready pipe response one I/O turn before declaring a delayed timer
+      // a timeout. Never change request/provider retry counts here.
+      () => setImmediate(() => finish(new Error("coordinator_unavailable"))),
+      timeoutMs,
     );
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) {
@@ -71,7 +78,7 @@ export async function serve(
   const server = createServer((socket) => {
     let raw = "",
       handled = false;
-    socket.setTimeout(10000, () => socket.destroy());
+    socket.setTimeout(IPC_TIMEOUT_MS, () => socket.destroy());
     socket.on("error", () => {});
     socket.on("data", (chunk) => {
       if (handled) return;

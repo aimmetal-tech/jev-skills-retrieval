@@ -334,7 +334,15 @@ export class Coordinator {
         (provider === "jev" && this.pauses.jev) ||
         job.state !== "running"
       )
-        return { ok: true, paused: this.fatal ?? "provider_or_job_paused" };
+        return {
+          ok: true,
+          paused: this.fatal ?? "provider_or_job_paused",
+          ...(this.pauses.pi
+            ? { pausedProvider: "pi", pauseReason: this.pauses.pi.reason }
+            : provider === "jev" && this.pauses.jev
+              ? { pausedProvider: "jev", pauseReason: this.pauses.jev.reason }
+              : {}),
+        };
       if (
         this.attempts.size >= this.spec.maxRequests ||
         this.knownTokens >= this.spec.maxTotalTokens
@@ -472,6 +480,7 @@ export class Coordinator {
     }
     if (r.op === "job-paused") {
       const job = this.job(r);
+      if (job.state === "completed") return { ok: true };
       this.record({
         type: "job",
         job: { ...job, state: "paused", reason: String(r.reason).slice(0, 64) },
@@ -498,6 +507,15 @@ export class Coordinator {
       )
         throw new Error("invalid_trial_result");
       if (job.state === "completed") return { ok: true };
+      if (
+        row.status === "budget" ||
+        row.status === "timeout" ||
+        row.failure === "context_limit"
+      ) {
+        const reason = `guard:${row.failure === "turn_limit" || row.failure === "context_limit" ? row.failure : row.status}`;
+        this.record({ type: "job", job: { ...job, state: "paused", reason } });
+        return { ok: true, paused: reason };
+      }
       if (row.status !== "completed") {
         this.pause("pi", "trial_provider_or_harness_error");
         return { ok: true, paused: "trial_error" };
@@ -575,7 +593,12 @@ export class Coordinator {
           reason: "infrastructure_interrupted_unknown",
         });
     for (const j of this.jobs.values())
-      if (j.state === "running")
+      if (
+        j.state === "running" ||
+        (j.state === "paused" &&
+          (j.reason?.startsWith("infrastructure:") ||
+            j.reason === "operator:stop"))
+      )
         this.record({ type: "job", job: { ...j, state: "queued" } });
     this.record({ type: "fatal", reason: "" });
   }

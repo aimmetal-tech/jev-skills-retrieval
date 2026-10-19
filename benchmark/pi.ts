@@ -180,6 +180,7 @@ export async function runPiTrial(options: PiTrialOptions): Promise<Trial> {
     pi.on("turn_start", (_event, ctx) => {
       if (++turns > budget.limits.maxTurns) {
         row.status = "budget";
+        row.failure = "turn_limit";
         ctx.abort();
       }
     });
@@ -492,9 +493,9 @@ export async function runPiTrial(options: PiTrialOptions): Promise<Trial> {
         row.pi.complete = false;
         budget.account(null);
       }
-      if (event.message.stopReason === "error")
+      if (event.message.stopReason === "error" && row.status !== "budget")
         row.status = budget.stopped ? "budget" : "provider_error";
-      if (event.message.stopReason === "error")
+      if (event.message.stopReason === "error" && row.failure !== "turn_limit")
         row.failure =
           /context|too.{0,20}long|maximum.{0,20}token|input.{0,20}limit/i.test(
             event.message.errorMessage ?? "",
@@ -526,7 +527,8 @@ export async function runPiTrial(options: PiTrialOptions): Promise<Trial> {
       row.status = budget.stopped ? "budget" : "harness_error";
   } catch (error) {
     options.onFailure?.(error);
-    row.status = budget.stopped ? "budget" : "harness_error";
+    if (row.status !== "budget")
+      row.status = budget.stopped ? "budget" : "harness_error";
   } finally {
     clearTimeout(timer);
     session.dispose();
