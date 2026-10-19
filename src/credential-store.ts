@@ -23,7 +23,7 @@ export function credentialFile(home: string = homedir()): string {
 }
 
 export function validApiKey(value: unknown): value is string {
-  return typeof value === "string" && !!value.trim() && !/[\r\n\0]/.test(value);
+  return typeof value === "string" && !!value.trim() && !/\p{Cc}/u.test(value);
 }
 
 /** Public errors contain no file data, subprocess output or credential values. */

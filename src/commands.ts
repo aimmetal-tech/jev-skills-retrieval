@@ -12,8 +12,8 @@ import type { RouteReport } from "./router.ts";
 const subcommands = [
   {
     value: "apikey",
-    label: "apikey [reset]",
-    description: "打开掩码输入框，保存用户凭据；reset 删除本地凭据",
+    label: "apikey [add <apikey>|reset]",
+    description: "打开掩码输入框；add 直接保存 key；reset 删除本地凭据",
   },
   {
     value: "baseurl",
@@ -30,6 +30,7 @@ const subcommands = [
 
 const help = [
   "/jev-skill apikey  — 打开掩码输入框，保存或更换用户 API key",
+  "/jev-skill apikey add <apikey>  — 直接保存 add 后的 API key",
   "/jev-skill apikey reset  — 删除用户目录中的本地凭据",
   "/jev-skill baseurl  — 打开 Base URL 输入框",
   "/jev-skill baseurl <URL>  — 保存当前项目的 Jev API 根地址",
@@ -51,19 +52,26 @@ export function registerJevSkillCommand(
 ): void {
   pi.registerCommand("jev-skill", {
     description:
-      "配置 Jev：apikey（掩码输入） · baseurl [URL|reset] · status · help",
+      "配置 Jev：apikey [add <apikey>|reset] · baseurl [URL|reset] · status · help",
     getArgumentCompletions: (prefix) => {
       const text = prefix.trimStart();
       if (/^apikey\s/.test(text)) {
-        return "reset".startsWith(text.replace(/^apikey\s+/, ""))
-          ? [
-              {
-                value: "apikey reset",
-                label: "reset",
-                description: "删除本地凭据；环境变量仍优先",
-              },
-            ]
-          : null;
+        const argument = text.replace(/^apikey\s+/, "");
+        const items = [
+          {
+            value: "apikey add",
+            label: "add <apikey>",
+            description: "直接保存 add 后的 API key（输入在编辑器中可见）",
+          },
+          {
+            value: "apikey reset",
+            label: "reset",
+            description: "删除本地凭据；环境变量仍优先",
+          },
+        ].filter((item) =>
+          item.value.slice("apikey ".length).startsWith(argument),
+        );
+        return items.length ? items : null;
       }
       if (/^baseurl\s/i.test(text)) {
         const argument = text.replace(/^baseurl\s+/i, "");
@@ -88,8 +96,9 @@ export function registerJevSkillCommand(
       return items.length ? items : null;
     },
     handler: async (args, ctx) => {
-      const [command = "", ...parts] = args.trim().split(/\s+/);
-      const argument = parts.join(" ");
+      const [, command = "", argument = ""] =
+        args.trim().match(/^(\S+)(?:\s+([\s\S]*))?$/) ?? [];
+      const add = command === "apikey" && /^add(?:\s|$)/.test(argument);
       const notify = (
         message: string,
         type: "info" | "warning" | "error" = "info",
@@ -132,9 +141,9 @@ export function registerJevSkillCommand(
         notify(`未知命令或参数。\n${help}`, "warning");
         return;
       }
-      if (command === "apikey" && argument && argument !== "reset") {
+      if (command === "apikey" && argument && argument !== "reset" && !add) {
         notify(
-          "请运行 /jev-skill apikey，在掩码输入框中填写；key 不作为命令明文参数。",
+          "用法：/jev-skill apikey、/jev-skill apikey add <apikey> 或 /jev-skill apikey reset。",
           "warning",
         );
         return;
@@ -157,12 +166,21 @@ export function registerJevSkillCommand(
           }
           return;
         }
-        const result = await options.credentials.configure(ctx);
+        const result = ctx.signal?.aborted
+          ? { status: "aborted" as const }
+          : add
+            ? options.credentials.save(argument.slice(3))
+            : await options.credentials.configure(ctx);
         if (result.status === "ready") {
           notify(
             options.credentials.getSource() === "environment"
               ? `API key 已保存至 ${options.credentials.filePath}；当前仍优先使用 TYPESAFE_API_KEY。`
               : `API key 已保存至 ${options.credentials.filePath}；重启后自动读取。`,
+          );
+        } else if (result.status === "invalid") {
+          notify(
+            "用法：/jev-skill apikey add <apikey>；API key 不能为空，且必须是单行文本。",
+            "warning",
           );
         } else if (result.status === "unavailable") {
           notify(

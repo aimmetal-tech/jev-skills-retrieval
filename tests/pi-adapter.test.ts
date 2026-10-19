@@ -14,6 +14,7 @@ import {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import { matchesKey } from "@earendil-works/pi-tui";
 import {
   DEFAULT_CONFIG,
   loadConfig,
@@ -584,10 +585,13 @@ function terminalInput(
       const component = await factory(
         { requestRender() {} } as CustomArguments[0],
         {} as CustomArguments[1],
-        {} as CustomArguments[2],
+        {
+          matches: (data: string) => matchesKey(data, "alt+v"),
+        } as unknown as CustomArguments[2],
         done,
       );
       assert(component instanceof MaskedKeyInput);
+      component.focused = true;
       try {
         await onOpen(component);
         return (await result) as T;
@@ -760,6 +764,16 @@ test("/jev-skill registers described subcommand completions and help/status stay
         (item) => item.value,
       ),
       ["apikey reset"],
+    );
+    assert.deepEqual(
+      (await command.getArgumentCompletions?.("apikey "))?.map(
+        (item) => item.value,
+      ),
+      ["apikey add", "apikey reset"],
+    );
+    assert.equal(
+      await command.getArgumentCompletions?.("apikey add test-secret"),
+      null,
     );
     assert.equal(
       await command.getArgumentCompletions?.("no-such-command"),
@@ -953,6 +967,73 @@ test("/jev-skill apikey uses masked editing, preserves cancellation and changes 
   }
 });
 
+test("/jev-skill apikey add persists the literal key across restarts without dialogs, model calls or secret-bearing diagnostics", async () => {
+  const notices: string[] = [];
+  const transport = sdkTransport();
+  let file = "";
+  const h = await harness(
+    (root) => {
+      file = credentialFile(join(root, "credential-home"));
+      return createSkillRouterExtension({
+        getApiKey: () => undefined,
+        credentialStore: new FileCredentialStore(file),
+        fetch: transport.fetch,
+        configuration: () => configuration(root),
+      });
+    },
+    false,
+    undefined,
+    {
+      mode: "rpc",
+      ui: {
+        notify: (message) => notices.push(message),
+        input: async () => {
+          throw new Error("Must not open a dialog");
+        },
+      },
+    },
+  );
+  try {
+    for (const key of ["literal-add-secret-$()-'", "replacement-add-secret"]) {
+      const previousRequests = transport.requests.length;
+      await h.session.prompt(`/jev-skill apikey add ${key}`);
+      assert.equal(new FileCredentialStore(file).read(), key);
+      assert.equal(transport.requests.length, previousRequests);
+      assert.equal(h.payloads.length, previousRequests);
+      await h.session.prompt("Task after saving key");
+      assert.equal(transport.requests.at(-1)?.authorization, `Bearer ${key}`);
+    }
+    for (const argument of [
+      "add",
+      "add   ",
+      "add invalid-secret\nsecond-line",
+      "add invalid-secret\0data",
+    ]) {
+      await h.session.prompt(`/jev-skill apikey ${argument}`);
+      assert.equal(
+        new FileCredentialStore(file).read(),
+        "replacement-add-secret",
+      );
+    }
+    await h.session.prompt("/jev-skill status");
+    assert(notices.some((value) => value.includes("API key 已保存")));
+    assert(notices.some((value) => value.includes("API key 不能为空")));
+    assert.doesNotMatch(
+      JSON.stringify({
+        notices,
+        errors: h.errors,
+        branch: h.session.sessionManager.getBranch(),
+        payloads: h.payloads,
+        bodies: transport.requests.map((request) => request.body),
+      }),
+      /add-secret|invalid-secret|second-line/,
+    );
+    assert.deepEqual(h.errors, []);
+  } finally {
+    await h.close();
+  }
+});
+
 test("/jev-skill baseurl persists project roots, validates dialog input and sends later SDK calls to that root; reset restores user root", async () => {
   const notices: string[] = [];
   const answers = [" ", "ftp://invalid.example", "https://dialog.example/jev/"];
@@ -1136,11 +1217,12 @@ test("/jev-skill baseurl cancellation preserves the exact file and command mutat
       "/jev-skill baseurl https://should-not-save.example",
     );
     await h.session.prompt("/jev-skill apikey");
+    await h.session.prompt("/jev-skill apikey add busy-secret");
     assert.equal(dialogs, 1);
     assert.equal(await readFile(file, "utf8"), before);
     assert.equal(
       notices.filter((value) => value.includes("当前任务正在运行")).length,
-      2,
+      3,
     );
     release();
     await pending;
@@ -1154,15 +1236,19 @@ test("/jev-skill baseurl cancellation preserves the exact file and command mutat
 
 test("headless /jev-skill accepts explicit Base URL but never opens a credential dialog or sends a model request", async () => {
   const transport = sdkTransport();
+  const store = new MemoryCredentialStore();
   const h = await harness((root) =>
     createSkillRouterExtension({
       getApiKey: () => undefined,
+      credentialStore: store,
       fetch: transport.fetch,
       configuration: () => configuration(root),
     }),
   );
   try {
     await h.session.prompt("/jev-skill apikey");
+    await h.session.prompt("/jev-skill apikey add headless-add-secret");
+    assert.equal(store.key, "headless-add-secret");
     await h.session.prompt("/jev-skill baseurl");
     await h.session.prompt("/jev-skill baseurl https://headless.example");
     assert.equal(

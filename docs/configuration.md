@@ -37,6 +37,7 @@ Pi 会显示二级命令补全及用途说明；输入 `api`、`base` 可过滤�
 | 命令 | 用途与提示 |
 | --- | --- |
 | `/jev-skill apikey` | 打开掩码输入框，填写或更换 key；Enter 保存，Esc 保留原值 |
+| `/jev-skill apikey add <apikey>` | 直接保存 add 后的 key，无需弹窗；支持无界面模式 |
 | `/jev-skill apikey reset` | 删除用户目录中的凭据及内存缓存；环境变量仍优先 |
 | `/jev-skill baseurl` | 打开带地址示例的输入框；无效地址继续提示，Esc 保留原值 |
 | `/jev-skill baseurl https://api.typesafe.ai` | 设置当前项目的 Jev API 根地址，下一次路由生效 |
@@ -44,10 +45,17 @@ Pi 会显示二级命令补全及用途说明；输入 `api`、`base` 可过滤�
 | `/jev-skill status` | 显示 key 是否已配置及来源、地址、模型和最近路由结果 |
 | `/jev-skill help` | 显示二级命令用法 |
 
-`apikey` 在弹窗中填写，不接收明文命令参数。提交后保存到用户目录的专用文件；
+`apikey` 无参数时在弹窗中填写，支持 Ctrl+V、Ctrl+Shift+V、Shift+Insert，
+以及 Pi 配置的剪贴板快捷键和终端直接粘贴。系统剪贴板不可用时显示可重试提示；
+取消后不会采用尚未完成的剪贴板读取。终端按键由宿主拦截时，可使用宿主的粘贴操作。
+也可以输入 `/jev-skill apikey add your-key`，直接保存 `add` 后的文本，去除首尾空白；
+空值、多行或含控制字符的 key 会被拒绝，不打开弹窗、不回显输入。
+提交后保存到用户目录的专用文件；
 若已有 `TYPESAFE_API_KEY`，该环境变量仍优先，保存后会明确提示。
 不会自动把环境变量中的 key 复制到文件。取消、弹窗失败或保存失败时保留原值。
-配置修改要求当前任务已结束；帮助和状态可随时查看。命令不会调用模型或写入聊天历史。
+配置修改要求当前任务已结束；帮助和状态可随时查看。命令不会调用模型或写入模型会话。
+`apikey add` 在主编辑器中明文输入，Pi 可将它保留于本地输入历史；
+需要掩码输入时使用无参数的 `/jev-skill apikey`。
 RPC 使用原生输入协议，输入框是否掩码由客户端决定。
 
 凭据文件路径为 `~/.jev-skill-router/credentials.json`，Windows 通常是

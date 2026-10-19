@@ -152,6 +152,142 @@ test("TUI masks typed and pasted keys at all widths while submitting the origina
   assert.equal(input.getValue(), "");
 });
 
+test("clipboard shortcuts insert masked text at the cursor and preserve Pi editing and submission", async () => {
+  for (const shortcut of [
+    "\x16",
+    "\x1b[118;5u",
+    "\x1b[118;6u",
+    "\x1b[2;2~",
+    "custom-paste",
+  ]) {
+    let reads = 0;
+    const input = new MaskedKeyInput(() => {}, "configure", {
+      read: async () => {
+        reads++;
+        return "  clipboard-test-secret  ";
+      },
+      matchesPaste: (data) => data === "custom-paste",
+    });
+    input.focused = true;
+    input.handleInput("ab");
+    input.handleInput("\x1b[D");
+    input.render(60);
+    input.handleInput(shortcut);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(reads, 1);
+    assert.equal(input.getValue(), "aclipboard-test-secretb");
+    assert.doesNotMatch(input.render(60).join("\n"), /clipboard-test-secret/);
+    input.handleInput("\x7f");
+    assert.equal(input.getValue(), "aclipboard-test-secreb");
+    let submitted: string | undefined;
+    input.onSubmit = (value) => {
+      submitted = value;
+    };
+    input.handleInput("\r");
+    assert.equal(submitted, "aclipboard-test-secreb");
+    input.dispose();
+  }
+});
+
+test("pending clipboard reads cannot submit incomplete keys or repopulate cancelled dialogs", async () => {
+  let release: (value: string) => void = () => {};
+  let reads = 0;
+  let submissions = 0;
+  const input = new MaskedKeyInput(() => {}, "task", {
+    read: () => {
+      reads++;
+      return new Promise((resolve) => {
+        release = resolve;
+      });
+    },
+  });
+  input.focused = true;
+  input.onSubmit = () => {
+    submissions++;
+  };
+  input.onEscape = () => input.dispose();
+  input.handleInput("\x16");
+  input.handleInput("\x16");
+  input.handleInput("\r");
+  assert.equal(reads, 1);
+  assert.equal(submissions, 0);
+  input.handleInput("\x1b");
+  release("late-clipboard-secret");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(input.getValue(), "");
+  input.handleInput("more-text");
+  assert.equal(input.getValue(), "");
+});
+
+test("clipboard failures, empty text and control sequences preserve input without leaking clipboard contents", async () => {
+  const answers = [
+    undefined,
+    "",
+    "first\nsecond",
+    "secret\x1b[201~\r",
+    new Error("clipboard-error-secret"),
+    "recovered-test-key",
+  ];
+  const input = new MaskedKeyInput(() => {}, "configure", {
+    read: async () => {
+      const value = answers.shift();
+      if (value instanceof Error) throw value;
+      return value;
+    },
+  });
+  input.focused = true;
+  input.handleInput("old-key");
+  for (let index = 0; index < 5; index++) {
+    input.handleInput("\x16");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(input.getValue(), "old-key");
+    assert.doesNotMatch(
+      input.render(100).join("\n"),
+      /old-key|first|second|secret/,
+    );
+  }
+  input.handleInput("\x16");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(input.getValue(), "old-keyrecovered-test-key");
+  input.dispose();
+});
+
+test("direct key saves share validation and preserve credentials when storage fails or environment wins", () => {
+  const store = new MemoryCredentialStore();
+  store.key = "old-saved-key";
+  let environment: string | undefined;
+  const credentials = new JevCredentials(() => environment, store);
+  assert.equal(credentials.getApiKey(), "old-saved-key");
+  for (const value of [
+    "",
+    " ",
+    "first\nsecond",
+    "key\0data",
+    "key\tdata",
+    "key\x1bdata",
+  ]) {
+    assert.deepEqual(credentials.save(value), { status: "invalid" });
+    assert.equal(credentials.getApiKey(), "old-saved-key");
+  }
+  assert.deepEqual(credentials.save("  direct-test-key  "), {
+    status: "ready",
+  });
+  credentials.clear();
+  assert.equal(credentials.getApiKey(), "direct-test-key");
+  environment = "environment-key";
+  assert.deepEqual(credentials.save("replacement-key"), { status: "ready" });
+  assert.equal(credentials.getApiKey(), "environment-key");
+  environment = undefined;
+  store.save = () => {
+    throw new Error("storage-error-secret");
+  };
+  assert.deepEqual(credentials.save("unsaved-key"), {
+    status: "storage_error",
+  });
+  assert.equal(credentials.getApiKey(), "replacement-key");
+  assert.equal(store.key, "replacement-key");
+});
+
 test("explicit key configuration replaces the saved key, preserves it on cancellation and respects environment priority", async () => {
   let environment: string | undefined;
   const answers = ["first-key", undefined, "second-key", "third-key"];

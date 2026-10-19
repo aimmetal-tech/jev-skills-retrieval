@@ -60,6 +60,20 @@ export class JevCredentials {
     this.clear();
   }
 
+  save(value: string): CredentialResult | { status: "invalid" } {
+    const key = value.trim();
+    if (!validApiKey(key)) return { status: "invalid" };
+    try {
+      this.store.save(key);
+    } catch {
+      return { status: "storage_error" };
+    }
+    this.enteredKey = key;
+    this.loaded = true;
+    this.storageError = false;
+    return { status: "ready" };
+  }
+
   async ensure(
     ctx: Pick<ExtensionContext, "ui" | "hasUI" | "mode" | "signal">,
   ): Promise<CredentialResult> {
@@ -85,8 +99,8 @@ export class JevCredentials {
         const value = await promptForApiKey(ctx, purpose);
         if (ctx.signal?.aborted) return { status: "aborted" };
         if (value === undefined) return { status: "cancelled" };
-        const key = value.trim();
-        if (!validApiKey(key)) {
+        const result = this.save(value);
+        if (result.status === "invalid") {
           ctx.ui.notify(
             purpose === "task"
               ? "API key 不能为空，且必须是单行文本。请重新填写，或取消本次任务。"
@@ -95,15 +109,7 @@ export class JevCredentials {
           );
           continue;
         }
-        try {
-          this.store.save(key);
-        } catch {
-          return { status: "storage_error" };
-        }
-        this.enteredKey = key;
-        this.loaded = true;
-        this.storageError = false;
-        return { status: "ready" };
+        return result;
       }
       return { status: "aborted" };
     } catch {

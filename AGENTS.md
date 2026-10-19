@@ -13,7 +13,7 @@ README 只保留用途、最短上手、关键结果和文档入口。[配置](d
 - 完整候选按 JSON 字节保护分批；同一查询批次串行，默认完成后间隔 1 秒。全部评分成功后统一筛选，不把部分覆盖伪装成正常结果。生产 SDK 重试为 0；BM25/向量预筛选尚未实现。
 - 默认准备/评估/总时限为 5/10/15 秒，单批 10 秒；48,000 字节 payload、24,000 字节 state+单题、128 批是本地保护，不是服务 Token 上界。较大目录需显式配置；不可静默延长操作者给出的 guard。
 - 不承诺运行中插话、接管加载扩展前的历史会话、其他 harness 或删除历史技能正文。扩展历史只留用户原文和助手可见文本，不读工具结果、思考或正文。
-- Jev 使用官方 SDK，默认显式模型 `jev-1.14.0`。key 优先 `TYPESAFE_API_KEY`，其次专用用户文件 `~/.jev-skill-router/credentials.json`，再交互输入。Windows DPAPI/POSIX 权限隔离；秘密不进入项目配置、会话、报告或命令参数，不自动落盘环境 key。退出只清内存。
+- Jev 使用官方 SDK，默认显式模型 `jev-1.14.0`。key 优先 `TYPESAFE_API_KEY`，其次专用用户文件 `~/.jev-skill-router/credentials.json`，再交互输入。Windows DPAPI/POSIX 权限隔离；秘密不进入项目配置、模型会话、报告或子进程参数，不自动落盘环境 key。支持 `/jev-skill apikey add <apikey>` 直接保存；该命令在 Pi 编辑器中明文输入，可保留于编辑器本地输入历史。退出只清内存。
 - Jev 地址顺序：项目配置 > 用户配置 > `TYPESAFE_BASE_URL` > 官方默认；SDK 接收 API 根地址，附加 `/v1/systemone`。地址不是代理。旧 `.pi/skill-router.json`、`/jev-skill`、`/skill-router-status`、会话类型 `jev-skill-router` 保持兼容。
 - 若新增通用大模型接口，优先 `LLM_API_KEY` / `LLM_BASE_URL` 和 OpenAI Chat Completions。现有真实 benchmark 必须使用 Pi 原生 OpenAI OAuth `gpt-6-luna` / `medium`，不能用通用地址或 API-key provider 替换；Jev 为独立服务。
 - 只记真实已派发 HTTP；批次尝试结算回调负责成本，最终报告不重复累加。保留失败前已知 usage；未知不是零，完整总量及 tokens/success 保持未知。缓存计一次，reasoning 是 output 子集，Token 不是账单。
@@ -36,9 +36,10 @@ README 只保留用途、最短上手、关键结果和文档入口。[配置](d
 |   +-- config.ts              # 两层配置与默认值
 |   +-- commands.ts            # /jev-skill 与兼容命令
 |   +-- base-url.ts            # 地址校验、项目配置原子写入
-|   +-- credentials.ts         # 凭据门禁与内存缓存
+|   +-- credentials.ts         # 凭据门禁、弹窗/命令共用保存与内存缓存
 |   +-- credential-store.ts    # 用户文件、DPAPI/权限、原子写入
-|   `-- key-prompt.ts          # TUI/RPC 输入桥接
+|   +-- clipboard.ts           # 文本剪贴板读取，Pi 原生助手与系统工具回退
+|   `-- key-prompt.ts          # TUI/RPC 输入桥接、掩码和剪贴板快捷键
 +-- eval/                      # 8 个合成用例、预览/显式 live、指标
 +-- benchmark/
 |   +-- parallel/              # 协议 3 协调器、IPC、worker、时钟与恢复
@@ -84,6 +85,8 @@ README 只保留用途、最短上手、关键结果和文档入口。[配置](d
 
 ```mermaid
 flowchart TD
+  U["/jev-skill apikey 或 apikey add <apikey>"] --> V["统一校验与用户凭据存储"]
+  V --> C
   A["原始输入 + Pi 完整目录 + 两层配置"] --> B["before_agent_start 请求内身份快照"]
   B --> C["固定项与阻塞凭据门禁"]
   C -->|"缺 key 或取消"| X["停止当前任务"]

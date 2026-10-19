@@ -49,6 +49,11 @@ flowchart TD
 
 `credentials.ts` 优先读 `TYPESAFE_API_KEY`，其次读取专用用户文件，再等待交互输入。Windows 使用当前用户 DPAPI，POSIX 使用 0700 目录/0600 文件。秘密通过子进程 stdin 传入，不放命令参数；不自动持久化环境变量中的 key。
 
+`key-prompt.ts` 为 TUI 掩码弹窗补充剪贴板快捷键；`clipboard.ts` 仅读取文本，
+优先使用 Pi 公开原生剪贴板助手，不可用时调用系统工具。异步读取结果在弹窗关闭后丢弃。
+`commands.ts` 支持 `/jev-skill apikey add <apikey>`，与弹窗共用 `credentials.ts`
+的校验与保存路径；命令不会进入模型会话，但 Pi 编辑器可保留其明文输入历史。
+
 项目和包改名为 `jev-skills-retrieval`，以下接口仍保持原值：
 
 | 接口 | 兼容标识 |
