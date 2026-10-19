@@ -170,6 +170,16 @@ to `~/.jev-skill-router/credentials.json`; never to project config or session da
   Formal attempts retain unknown costs even after a successful retry. Report
   notes disclose harness upgrades and recovery latency; do not merge these into
   homogeneous calibration throughput claims.
+  On 2026-10-19 the user requested stopping both groups and freezing results.
+  `outputs/benchmark/frozen/<run>-stopped-<timestamp>/` holds evidence.tar, an
+  every-file SHA256 manifest, verified archive contents, stop/process seal,
+  source/data provenance and separate derived reports. Never resume automatically
+  or overwrite frozen evidence. The stopped original retains resumable checkpoints.
+  Reports use completed common-query pairs; unequal all-completed coverage and
+  complete-usage subsets stay separate, with unknown costs retained. Last journal
+  running states whose workers exited are described as interrupted in derived
+  coverage, never rewritten in the source or counted as completed. Snapshot/report
+  artifacts are ignored and must not be committed with credentials or raw evidence.
   Legacy protocol 2 (separate from the new parallel protocol above): the user
   explicitly authorized unknown-cost recording followed by bounded backoff
   retries in this persistent benchmark: `--continue-unknown-usage` retains unknown
