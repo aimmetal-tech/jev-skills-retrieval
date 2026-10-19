@@ -30,6 +30,34 @@ export interface SkillPromptNames {
   pinned: readonly string[];
 }
 
+export function formatSkillPromptStartup(
+  mode: "active" | "existing_session" | "disabled" | "invalid_config",
+): string {
+  if (mode === "existing_session")
+    return [
+      "[jev-skills-retrieval] 已加载 · 旧会话未接管筛选",
+      "请执行 /new 启用先筛选后发送；已有历史不会被清除。",
+      "启动 [Skills] 是本地发现清单，不能据此判断当前目录是否已经筛选。",
+    ].join("\n");
+  if (mode === "invalid_config")
+    return [
+      "[jev-skills-retrieval] 已加载 · 配置存在问题，筛选尚未就绪",
+      "请检查 skill-router.json；当前请求可能回退完整技能目录。",
+    ].join("\n");
+  if (mode === "disabled")
+    return [
+      "[jev-skills-retrieval] 已加载 · 自动筛选已关闭",
+      "[Skills] 仅为本地清单；正常请求仅保留固定项，不自动写入完整目录。",
+      "配置异常时仍会明确提示全量回退。",
+    ].join("\n");
+  return [
+    "[jev-skills-retrieval] 已开启 · 先筛选后发送",
+    "[Skills] 只是本地发现清单；正常请求不会自动把全部 skill metadata 装入系统提示词。",
+    "Jev 先筛选，仅选中项与固定项进入本轮系统提示词；正文由 Pi 按需读取。",
+    "服务或配置异常时，会明确提示全量回退。",
+  ].join("\n");
+}
+
 export function formatSkillPromptNames(
   status: SkillPromptStatus,
   names?: SkillPromptNames,

@@ -82,7 +82,11 @@ async function harness(
   factory: (root: string) => ExtensionFactory,
   toolFirst = false,
   after?: ExtensionFactory,
-  interaction?: { ui: Partial<ExtensionUIContext>; mode: "tui" | "rpc" },
+  interaction?: {
+    ui: Partial<ExtensionUIContext>;
+    mode: "tui" | "rpc";
+    sessionStartReason?: "startup" | "new";
+  },
 ) {
   const root = await mkdtemp(join(tmpdir(), "jev-pi-test-"));
   const payloads: Payload[] = [];
@@ -180,6 +184,14 @@ async function harness(
     settingsManager,
     tools: ["read"],
     thinkingLevel: "off",
+    ...(interaction?.sessionStartReason
+      ? {
+          sessionStartEvent: {
+            type: "session_start" as const,
+            reason: interaction.sessionStartReason,
+          },
+        }
+      : {}),
   });
   assert.deepEqual(extensionsResult.errors, []);
   await session.bindExtensions({
@@ -255,6 +267,93 @@ function promptIndicators() {
     } satisfies Partial<ExtensionUIContext>,
   };
 }
+
+test("startup and new-session events visibly announce Jev filtering before any task or provider request", async () => {
+  for (const reason of ["startup", "new"] as const) {
+    const indicator = promptIndicators();
+    let evaluations = 0;
+    const h = await harness(
+      (root) =>
+        createSkillRouterExtension({
+          configuration: () => configuration(root),
+          evaluate: async (request) => {
+            evaluations++;
+            return score(request, ["alpha"]);
+          },
+        }),
+      false,
+      undefined,
+      { mode: "tui", ui: indicator.ui, sessionStartReason: reason },
+    );
+    try {
+      const banner = indicator.notices.find((text) =>
+        text.startsWith("[jev-skills-retrieval] 已开启"),
+      );
+      assert(banner);
+      assert.match(banner, /先筛选后发送/);
+      assert.match(
+        banner,
+        /正常请求不会自动把全部 skill metadata 装入系统提示词/,
+      );
+      assert.match(banner, /仅选中项与固定项/);
+      assert.match(banner, /全量回退/);
+      assert.equal(evaluations, 0);
+      assert.equal(h.payloads.length, 0);
+      assert.doesNotMatch(
+        JSON.stringify(h.session.sessionManager.getBranch()),
+        /已开启|只是本地发现清单/,
+      );
+      await h.session.prompt("/jev-skill status");
+      assert.equal(
+        indicator.notices.filter((text) =>
+          text.startsWith("[jev-skills-retrieval] 已开启"),
+        ).length,
+        1,
+      );
+      assert.deepEqual(h.errors, []);
+    } finally {
+      await h.close();
+    }
+  }
+});
+
+test("startup notices do not claim filtering is active when it is disabled or configuration is invalid", async () => {
+  for (const scenario of ["disabled", "invalid"] as const) {
+    const indicator = promptIndicators();
+    const h = await harness(
+      (root) =>
+        createSkillRouterExtension({
+          configuration: () =>
+            scenario === "disabled"
+              ? configuration(root, { maxAutoSkills: 0 })
+              : {
+                  ...configuration(root),
+                  issues: ["invalid local configuration"],
+                },
+        }),
+      false,
+      undefined,
+      { mode: "tui", ui: indicator.ui },
+    );
+    try {
+      const banner =
+        indicator.notices.find((text) =>
+          text.startsWith("[jev-skills-retrieval]"),
+        ) ?? "";
+      assert.match(
+        banner,
+        scenario === "disabled"
+          ? /自动筛选已关闭/
+          : /配置存在问题.*筛选尚未就绪/,
+      );
+      assert.doesNotMatch(banner, /已开启/);
+      assert.equal(h.payloads.length, 0);
+      assert.deepEqual(h.errors, []);
+    } finally {
+      await h.close();
+    }
+  }
+});
 
 test("visible Jev indicators distinguish filtered, zero-hit, fallback and disabled requests at the real provider boundary", async () => {
   for (const scenario of [
@@ -851,6 +950,8 @@ test("reloading an existing conversation clearly skips unsupported history takeo
   try {
     await h.session.prompt("First task");
     await h.session.reload();
+    assert.match(indicator.notices.at(-1) ?? "", /旧会话未接管筛选/);
+    assert.doesNotMatch(indicator.notices.at(-1) ?? "", /已开启/);
     await h.session.prompt("Existing history");
     assert.equal(calls, 1);
     assert.match(diagnostics.join("\n"), /requires a fresh session/);

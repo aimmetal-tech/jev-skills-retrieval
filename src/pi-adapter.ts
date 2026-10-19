@@ -16,6 +16,7 @@ import { JevCredentials } from "./credentials.ts";
 import { createJevEvaluator, type Evaluator } from "./jev-client.ts";
 import {
   formatSkillPromptNames,
+  formatSkillPromptStartup,
   formatSkillPromptStatus,
   type SkillPromptNames,
   type SkillPromptStatus,
@@ -139,6 +140,19 @@ export function createSkillRouterExtension(
           }
         : { mode: "waiting", verification: "not_sent" };
       showPromptStatus(ctx);
+      const loaded = configuration(ctx.cwd);
+      const startupMode = unsupportedSession
+        ? "existing_session"
+        : loaded.issues.length
+          ? "invalid_config"
+          : loaded.config.maxAutoSkills === 0 ||
+              loaded.config.autoMetadataMaxChars === 0
+            ? "disabled"
+            : "active";
+      ctx.ui.notify(
+        formatSkillPromptStartup(startupMode),
+        unsupportedSession || loaded.issues.length ? "warning" : "info",
+      );
     });
     pi.on("input", (event, ctx) => {
       if (event.streamingBehavior) {
