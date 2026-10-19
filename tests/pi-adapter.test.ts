@@ -76,6 +76,8 @@ function configuration(root: string, overrides: Partial<RouterConfig> = {}) {
 
 interface Payload {
   messages: Array<{ role: string; content: unknown }>;
+  input?: Array<{ role?: string; content?: unknown }>;
+  instructions?: string;
 }
 
 async function harness(
@@ -86,12 +88,18 @@ async function harness(
     ui: Partial<ExtensionUIContext>;
     mode: "tui" | "rpc";
     sessionStartReason?: "startup" | "new";
+    providerApi?: "openai-responses";
   },
 ) {
   const root = await mkdtemp(join(tmpdir(), "jev-pi-test-"));
   const payloads: Payload[] = [];
   const errors: unknown[] = [];
-  for (const name of ["alpha", "beta", "pinned"]) {
+  for (const name of [
+    "alpha",
+    "beta",
+    "pinned",
+    ...(interaction?.providerApi ? ["gamma", "delta"] : []),
+  ]) {
     const dir = join(root, ".pi", "skills", name);
     await mkdir(dir, { recursive: true });
     await writeFile(
@@ -105,6 +113,58 @@ async function harness(
     payloads.push(JSON.parse(body) as Payload);
     const toolCall = toolFirst && payloads.length === 1;
     res.writeHead(200, { "content-type": "text/event-stream" });
+    if (interaction?.providerApi === "openai-responses") {
+      const item = {
+        id: `msg${payloads.length}`,
+        type: "message",
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "output_text", text: "Complete.", annotations: [] }],
+      };
+      const response = {
+        id: `resp${payloads.length}`,
+        object: "response",
+        status: "completed",
+        model: "mock",
+        output: [item],
+        usage: {
+          input_tokens: 10,
+          output_tokens: 2,
+          total_tokens: 12,
+          input_tokens_details: { cached_tokens: 0 },
+          output_tokens_details: { reasoning_tokens: 0 },
+        },
+      };
+      const emit = (event: object) =>
+        res.write(`data: ${JSON.stringify(event)}\n\n`);
+      emit({
+        type: "response.created",
+        response: { ...response, status: "in_progress", output: [] },
+      });
+      emit({
+        type: "response.output_item.added",
+        output_index: 0,
+        item: { ...item, content: [] },
+      });
+      emit({
+        type: "response.content_part.added",
+        item_id: item.id,
+        output_index: 0,
+        content_index: 0,
+        part: { type: "output_text", text: "", annotations: [] },
+      });
+      emit({
+        type: "response.output_text.delta",
+        item_id: item.id,
+        output_index: 0,
+        content_index: 0,
+        delta: "Complete.",
+      });
+      emit({ type: "response.output_item.done", output_index: 0, item });
+      emit({ type: "response.completed", response });
+      res.end();
+      return;
+    }
     const delta = toolCall
       ? {
           role: "assistant",
@@ -148,7 +208,7 @@ async function harness(
   runtime.registerProvider("router-test", {
     baseUrl: `http://127.0.0.1:${address.port}/v1`,
     apiKey: "local-test-only",
-    api: "openai-completions",
+    api: interaction?.providerApi ?? "openai-completions",
     models: [
       {
         id: "mock",
@@ -158,6 +218,9 @@ async function harness(
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: 100000,
         maxTokens: 1000,
+        ...(interaction?.providerApi
+          ? { compat: { supportsMidConvoSystemMessages: true } }
+          : {}),
       },
     ],
   });
@@ -403,7 +466,7 @@ test("visible Jev indicators distinguish filtered, zero-hit, fallback and disabl
             ? 2
             : 1;
       const expected = new RegExp(
-        `${label}.*请求含 ${count}/${catalogCount} 项`,
+        `${label}.*本轮清单 ${count}/${catalogCount} 项`,
       );
       assert.match(indicator.statuses.at(-1) ?? "", expected);
       assert.match(indicator.widgets.at(-1) ?? "", expected);
@@ -489,6 +552,81 @@ test("skill-name indicators replace the previous request's selection and command
       assert.doesNotMatch(indicator.notices.at(-1) ?? "", /alpha/);
     }
     assert.equal(calls, 2);
+    assert.deepEqual(h.errors, []);
+  } finally {
+    await h.close();
+  }
+});
+
+test("real Responses multi-turn requests separate current skills from retained history without false conflicts", async () => {
+  const indicator = promptIndicators();
+  const diagnostics: string[] = [];
+  let turns = 0;
+  const h = await harness(
+    (root) =>
+      createSkillRouterExtension({
+        configuration: () => configuration(root, { pinnedSkillPaths: [] }),
+        evaluate: async (request) =>
+          score(
+            request,
+            ++turns === 1
+              ? ["alpha", "beta", "gamma", "delta"]
+              : turns === 2
+                ? ["alpha"]
+                : [],
+          ),
+        onDiagnostic: (message) => diagnostics.push(message),
+      }),
+    false,
+    undefined,
+    { mode: "tui", ui: indicator.ui, providerApi: "openai-responses" },
+  );
+  try {
+    const catalogCount = h.loader.getSkills().skills.length;
+    for (const [index, expected] of [
+      { active: 4, history: 0 },
+      { active: 1, history: 4 },
+      { active: 0, history: 5 },
+    ].entries()) {
+      await h.session.prompt(`Task ${index + 1}`);
+      const summary = indicator.statuses.at(-1) ?? "";
+      assert.match(
+        summary,
+        new RegExp(
+          `先筛选后发送.*本轮清单 ${expected.active}/${catalogCount} 项.*发送前已核验`,
+        ),
+      );
+      if (expected.history)
+        assert.match(summary, new RegExp(`历史另带 ${expected.history} 条`));
+      else assert.doesNotMatch(summary, /历史另带/);
+      const wire = JSON.stringify(h.payloads[index]);
+      assert.equal(
+        [...wire.matchAll(/<skill>/g)].length,
+        expected.active + expected.history,
+        "the fix must not rewrite the provider request or erase its history",
+      );
+    }
+    assert.equal(h.payloads.length, 3);
+    assert.match(
+      JSON.stringify(h.payloads[2]),
+      /Removed system prompt section/,
+    );
+    assert.deepEqual(diagnostics, []);
+    assert.doesNotMatch(
+      indicator.notices.join("\n"),
+      /本轮清单与计划不一致|Skill router conflict/,
+    );
+    await h.session.prompt("/jev-skill status");
+    assert.match(indicator.notices.at(-1) ?? "", /本轮清单 0.*历史另带 5/);
+    const recordCount = h.session.sessionManager.getBranch().length;
+    const before = indicator.statuses.at(-1);
+    // Request hooks outside an active task (e.g. compaction) must not reuse stale plans.
+    assert(h.session.extensionRunner);
+    await h.session.extensionRunner.emitBeforeProviderRequest({
+      messages: [{ role: "system", content: "Unrelated background request" }],
+    });
+    assert.equal(indicator.statuses.at(-1), before);
+    assert.equal(h.session.sessionManager.getBranch().length, recordCount);
     assert.deepEqual(h.errors, []);
   } finally {
     await h.close();
@@ -814,9 +952,21 @@ test("a provider payload override is displayed as a mismatch even when Pi's plan
       /Replaced at the provider boundary/,
     );
     assert.doesNotMatch(payloadText(h.payloads[0]), /UNIQUE_METADATA/);
-    assert.match(indicator.widgets.at(-1) ?? "", /目录被改写.*请求含 0/);
+    assert.match(
+      indicator.widgets.at(-1) ?? "",
+      /本轮清单与计划不一致.*本轮清单 0/,
+    );
     assert.doesNotMatch(indicator.widgets.at(-1) ?? "", /先筛选后发送/);
     assert.match(diagnostics.join("\n"), /conflict/);
+    assert.equal(
+      indicator.notices.filter((notice) => /本轮清单与计划不一致/.test(notice))
+        .length,
+      1,
+    );
+    assert.doesNotMatch(
+      indicator.notices.join("\n"),
+      /Skill router conflict|another extension or forced systemPrompt changed/,
+    );
     assert.deepEqual(h.errors, []);
   } finally {
     await h.close();

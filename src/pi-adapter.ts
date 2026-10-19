@@ -394,6 +394,7 @@ export function createSkillRouterExtension(
       }
     });
     pi.on("before_provider_request", (event, ctx) => {
+      if (expectedMetadata === undefined) return;
       // Other extensions may change the prompt after routing; inspect the provider fields.
       promptStatus = verifySkillPrompt(
         promptStatus,
@@ -417,9 +418,8 @@ export function createSkillRouterExtension(
       if (promptStatus.verification === "mismatch" && !conflictReported) {
         conflictReported = true;
         const message =
-          "Skill router conflict: another extension or forced systemPrompt changed the routed skill metadata. Check extension order and prompt overrides.";
+          "Skill router conflict: the effective skill catalog at this request checkpoint differs from the planned selection. Check prompt overrides (including forced systemPrompt) and extension order.";
         dependencies.onDiagnostic?.(message);
-        ctx.ui.notify(message, "warning");
       }
     });
     pi.on("message_end", (event) => {
@@ -431,6 +431,7 @@ export function createSkillRouterExtension(
       if (text) current.assistant += `${current.assistant ? "\n" : ""}${text}`;
     });
     pi.on("agent_end", () => {
+      expectedMetadata = undefined;
       if (current) history.push(current);
       if (history.length > historyLimit) earlierHistoryOmitted = true;
       history = historyLimit === 0 ? [] : history.slice(-historyLimit);

@@ -12,6 +12,7 @@ export interface SkillPromptStatus {
   catalogCount?: number;
   plannedCount?: number;
   observedCount?: number;
+  historicalCount?: number;
   phase?: "preparing" | "credentials" | "evaluating";
   completedBatches?: number;
   reason?:
@@ -94,11 +95,18 @@ function textContent(value: unknown): string | undefined {
 }
 
 /** Inspect only known system fields, never user messages, tool results or images. */
-function systemText(payload: unknown): string | undefined {
+function systemTexts(payload: unknown): string[] | undefined {
   if (!record(payload)) return undefined;
-  if ("system" in payload) return textContent(payload.system);
+  // A delta request cannot reveal the catalog retained on the provider's server.
+  if (payload.previous_response_id != null) return undefined;
   const texts: string[] = [];
   let recognized = false;
+  if ("system" in payload) {
+    const text = textContent(payload.system);
+    if (text === undefined) return undefined;
+    texts.push(text);
+    recognized = true;
+  }
   if ("instructions" in payload) {
     const text = textContent(payload.instructions);
     if (text === undefined) return undefined;
@@ -113,12 +121,15 @@ function systemText(payload: unknown): string | undefined {
     for (const message of messages) {
       if (!record(message)) return undefined;
       if (message.role !== "system" && message.role !== "developer") continue;
+      // Pi Responses can declare tools in a developer item without text.
+      if (message.type === "additional_tools" && !("content" in message))
+        continue;
       const text = textContent(message.content);
       if (text === undefined) return undefined;
       texts.push(text);
     }
   }
-  return recognized ? texts.join("\n") : undefined;
+  return recognized ? texts : undefined;
 }
 
 function skillBlocks(text: string): string[] | undefined {
@@ -133,32 +144,107 @@ function skillBlocks(text: string): string[] | undefined {
   return /<\/?available_skills\b/.test(rest) ? undefined : blocks;
 }
 
+/** Pi 1.3.0 renderSystemMessageUpdate framing; unfamiliar framing stays unknown. */
+function promptParts(
+  text: string,
+): Array<{ section?: string; text: string }> | undefined {
+  const headers = [
+    ...text.matchAll(
+      /(?:^|\n\n)(?:Updated system prompt section "([a-z][a-z0-9_-]*)":\n\n|Removed system prompt section "([a-z][a-z0-9_-]*)"\.(?=\n\n|$))/g,
+    ),
+  ];
+  if (!headers.length)
+    return /(?:Updated|Removed) system prompt section "skills"/.test(text)
+      ? undefined
+      : [{ text }];
+  const parts: Array<{ section?: string; text: string }> = [
+    { text: text.slice(0, headers[0]?.index) },
+  ];
+  for (const [index, header] of headers.entries()) {
+    const value = text.slice(
+      header.index + header[0].length,
+      headers[index + 1]?.index,
+    );
+    if (header[2] && value.trim()) return undefined;
+    parts.push({
+      section: (header[1] ?? header[2]) as string,
+      text: header[2] ? "" : value,
+    });
+  }
+  return parts;
+}
+
+function countSkills(blocks: readonly string[]): number {
+  return blocks.reduce(
+    (sum, block) => sum + [...block.matchAll(/<skill>/g)].length,
+    0,
+  );
+}
+
+/** Replay named skill replacements, retaining unframed additions as real mismatches. */
+function replaySkillBlocks(
+  texts: readonly string[],
+): { current: string[]; historicalCount: number } | undefined {
+  let current: string[] = [];
+  const additions: string[] = [];
+  let carriedCount = 0;
+  let ambiguousBaseline = false;
+  for (const [messageIndex, text] of texts.entries()) {
+    const parts = promptParts(text);
+    if (!parts) return undefined;
+    for (const [partIndex, part] of parts.entries()) {
+      const blocks = skillBlocks(part.text);
+      if (!blocks) return undefined;
+      carriedCount += countSkills(blocks);
+      if (part.section === "skills") {
+        // A flattened baseline with several catalogs has no reliable section ownership.
+        if (ambiguousBaseline) return undefined;
+        current = blocks;
+      } else if (messageIndex === 0 && partIndex === 0) {
+        current = blocks;
+        ambiguousBaseline = blocks.length > 1;
+      } else {
+        additions.push(...blocks);
+      }
+    }
+  }
+  const effective = [...current, ...additions];
+  return {
+    current: effective,
+    historicalCount: carriedCount - countSkills(effective),
+  };
+}
+
 export function verifySkillPrompt(
   status: SkillPromptStatus,
   payload: unknown,
   expected: string | undefined,
 ): SkillPromptStatus {
-  const text = systemText(payload);
-  const observed = text === undefined ? undefined : skillBlocks(text);
+  const texts = systemTexts(payload);
+  const replayed = texts === undefined ? undefined : replaySkillBlocks(texts);
+  const observed = replayed?.current;
   const planned = expected === undefined ? undefined : skillBlocks(expected);
-  if (!observed || !planned) {
-    const unavailable: SkillPromptStatus = {
+  const unavailable = (): SkillPromptStatus => {
+    const unverified: SkillPromptStatus = {
       ...status,
       verification: "unavailable",
     };
-    delete unavailable.observedCount;
-    return unavailable;
-  }
-  const observedCount = observed.reduce(
-    (sum, block) => sum + [...block.matchAll(/<skill>/g)].length,
-    0,
-  );
+    delete unverified.observedCount;
+    delete unverified.historicalCount;
+    return unverified;
+  };
+  if (!observed || !planned) return unavailable();
+  const observedCount = countSkills(observed);
   const matches =
     observed.length === planned.length &&
     observed.every((block, index) => block === planned[index]);
+  // APIs with a top-level system field can carry updates in other roles. Do not
+  // inspect user content or infer a conflict from an obsolete baseline alone.
+  if (!matches && record(payload) && "system" in payload) return unavailable();
   return {
     ...status,
     observedCount,
+    historicalCount: replayed?.historicalCount ?? 0,
     verification: matches ? "matched" : "mismatch",
   };
 }
@@ -193,7 +279,7 @@ export function formatSkillPromptStatus(
   const verified = status.verification === "matched";
   const label =
     status.verification === "mismatch"
-      ? "目录被改写，筛选效果未确认"
+      ? "本轮清单与计划不一致"
       : status.mode === "filtered"
         ? verified
           ? "先筛选后发送"
@@ -207,7 +293,7 @@ export function formatSkillPromptStatus(
   const counts =
     count === undefined
       ? ""
-      : ` · ${status.observedCount === undefined ? "计划" : "请求含"} ${count}${status.catalogCount === undefined ? "" : `/${status.catalogCount}`} 项 metadata`;
+      : ` · ${status.observedCount === undefined ? "计划" : "本轮清单"} ${count}${status.catalogCount === undefined ? "" : `/${status.catalogCount}`} 项 metadata`;
   const check = verified
     ? "发送前已核验"
     : status.verification === "pending"
@@ -218,5 +304,8 @@ export function formatSkillPromptStatus(
           ? "尚未发送主模型"
           : "请求格式无法核验";
   const selections = formatSkillPromptNames(status, names);
-  return `Jev 技能：${label}${selections.length ? ` · ${selections.join(" · ")}` : ""}${counts} · ${check}${status.reason ? ` · ${reasons[status.reason]}` : ""}`;
+  const history = status.historicalCount
+    ? ` · 历史另带 ${status.historicalCount} 条 metadata`
+    : "";
+  return `Jev 技能：${label}${selections.length ? ` · ${selections.join(" · ")}` : ""}${counts}${history} · ${check}${status.reason ? ` · ${reasons[status.reason]}` : ""}`;
 }

@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  getCurrentSystemPrompt,
+  getSystemMessageText,
+  renderSystemMessageUpdate,
+  type SystemMessage,
+} from "@earendil-works/pi-ai";
+import {
   formatSkillPromptNames,
   formatSkillPromptStatus,
   type SkillPromptStatus,
@@ -34,7 +40,7 @@ test("selected names distinguish automatic and pinned skills and remain planned 
   ]);
   assert.match(
     formatSkillPromptStatus(matched, names),
-    /自动选择：hf-cli、tavily-search.*固定项：项目约定.*请求/,
+    /自动选择：hf-cli、tavily-search.*固定项：项目约定.*本轮清单/,
   );
   for (const verification of ["pending", "unavailable", "mismatch"] as const) {
     assert.deepEqual(
@@ -99,7 +105,7 @@ test("prompt verification reads known system fields and ignores user and tool co
     assert.equal(result.observedCount, 1);
     assert.match(
       formatSkillPromptStatus(result),
-      /先筛选后发送.*请求含 1\/3 项.*发送前已核验/,
+      /先筛选后发送.*本轮清单 1\/3 项.*发送前已核验/,
     );
     assert.doesNotMatch(JSON.stringify(result), /secret-metadata|alpha|beta/);
   }
@@ -118,7 +124,7 @@ test("verification detects same-count replacements, additions, removals and dupl
       alpha,
     );
     assert.equal(result.verification, "mismatch");
-    assert.match(formatSkillPromptStatus(result), /目录被改写/);
+    assert.match(formatSkillPromptStatus(result), /本轮清单与计划不一致/);
     assert.doesNotMatch(formatSkillPromptStatus(result), /先筛选后发送/);
   }
 });
@@ -164,7 +170,185 @@ test("zero hits require a known empty system catalog; malformed and unsupported 
     );
     assert.equal(result.verification, "unavailable");
     assert.equal(result.observedCount, undefined);
-    assert.doesNotMatch(formatSkillPromptStatus(result), /先筛选后发送|请求含/);
+    assert.doesNotMatch(
+      formatSkillPromptStatus(result),
+      /先筛选后发送|本轮清单 \d/,
+    );
+  }
+});
+
+test("Pi native skill updates replace the active catalog while historical metadata is counted separately", () => {
+  const oldCatalog = `<available_skills>${["a", "b", "c", "d"]
+    .map((name) => `<skill><name>${name}</name></skill>`)
+    .join("")}</available_skills>`;
+  const initial: SystemMessage = {
+    role: "system",
+    content: "base prompt",
+    sections: { skills: oldCatalog },
+    timestamp: 1,
+  };
+  const update: SystemMessage = {
+    role: "system",
+    content: "",
+    sections: { skills: beta, cwd: "new-cwd" },
+    timestamp: 2,
+  };
+  assert.match(getCurrentSystemPrompt([initial, update]), /<name>beta<\/name>/);
+  assert.doesNotMatch(
+    getCurrentSystemPrompt([initial, update]),
+    /<name>a<\/name>/,
+  );
+  for (const payload of [
+    {
+      instructions: getSystemMessageText(initial),
+      input: [
+        { role: "developer", content: renderSystemMessageUpdate(update) },
+      ],
+    },
+    {
+      messages: [
+        { role: "system", content: getSystemMessageText(initial) },
+        { role: "user", content: alpha },
+        { role: "developer", content: renderSystemMessageUpdate(update) },
+        { type: "additional_tools", role: "developer", tools: [] },
+      ],
+    },
+  ]) {
+    const before = JSON.stringify(payload);
+    const result = verifySkillPrompt(
+      { ...selected, catalogCount: 14 },
+      payload,
+      beta,
+    );
+    assert.equal(result.verification, "matched");
+    assert.equal(result.observedCount, 1);
+    assert.equal(result.historicalCount, 4);
+    assert.match(
+      formatSkillPromptStatus(result),
+      /本轮清单 1\/14 项.*历史另带 4 条/,
+    );
+    assert.equal(JSON.stringify(payload), before);
+    assert.doesNotMatch(JSON.stringify(result), /secret-metadata|beta|new-cwd/);
+  }
+});
+
+test("Pi section replacement, removal and unrelated updates replay in order including zero hits", () => {
+  const initial: SystemMessage = {
+    role: "system",
+    content: "",
+    sections: { skills: alpha },
+    timestamp: 1,
+  };
+  const patches: SystemMessage[] = [
+    { role: "system", content: "", sections: { cwd: "new-cwd" }, timestamp: 2 },
+    { role: "system", content: "", sections: { skills: beta }, timestamp: 3 },
+    {
+      role: "system",
+      content: "",
+      sections: { skills: null, cwd: "last-cwd" },
+      timestamp: 4,
+    },
+  ];
+  const payload = {
+    instructions: getSystemMessageText(initial),
+    input: patches.map((message) => ({
+      role: "developer",
+      content: renderSystemMessageUpdate(message),
+    })),
+  };
+  assert.doesNotMatch(
+    getCurrentSystemPrompt([initial, ...patches]),
+    /available_skills/,
+  );
+  const removed = verifySkillPrompt(
+    { ...selected, plannedCount: 0 },
+    payload,
+    "",
+  );
+  assert.equal(removed.verification, "matched");
+  assert.equal(removed.observedCount, 0);
+  assert.equal(removed.historicalCount, 2);
+  assert.equal(
+    verifySkillPrompt(selected, payload, beta).verification,
+    "mismatch",
+  );
+  const restored = {
+    role: "developer",
+    content: renderSystemMessageUpdate({
+      role: "system",
+      content: "",
+      sections: { skills: alpha },
+      timestamp: 5,
+    }),
+  };
+  payload.input.push(restored);
+  const result = verifySkillPrompt(selected, payload, alpha);
+  assert.equal(result.verification, "matched");
+  assert.equal(result.observedCount, 1);
+  assert.equal(result.historicalCount, 2);
+});
+
+test("replay does not hide wrong latest catalogs or unframed additions and malformed updates stay unknown", () => {
+  const update = (value: string) =>
+    renderSystemMessageUpdate({
+      role: "system",
+      content: "",
+      sections: { skills: value },
+      timestamp: 2,
+    });
+  for (const input of [
+    [{ role: "developer", content: update(beta) }],
+    [
+      { role: "developer", content: update(alpha) },
+      { role: "developer", content: beta },
+    ],
+    [
+      { role: "developer", content: beta },
+      { role: "developer", content: update(alpha) },
+    ],
+  ]) {
+    assert.equal(
+      verifySkillPrompt(selected, { instructions: alpha, input }, alpha)
+        .verification,
+      "mismatch",
+    );
+  }
+  for (const text of [
+    `Updated system prompt section "skills":\n${beta}`,
+    update("<available_skills><skill>"),
+    'Removed system prompt section "skills".\n\nunrecognized suffix',
+  ]) {
+    const result = verifySkillPrompt(
+      { ...selected, observedCount: 1, historicalCount: 4 },
+      { instructions: alpha, input: [{ role: "developer", content: text }] },
+      beta,
+    );
+    assert.equal(result.verification, "unavailable");
+    assert.equal(result.observedCount, undefined);
+    assert.equal(result.historicalCount, undefined);
+  }
+});
+
+test("provider-side history and top-level system baselines with opaque updates remain unverified", () => {
+  for (const payload of [
+    {
+      previous_response_id: "fake-response-id",
+      instructions: alpha,
+      input: [],
+    },
+    {
+      system: alpha,
+      messages: [{ role: "user", content: "opaque update not inspected" }],
+    },
+  ]) {
+    const result = verifySkillPrompt(
+      { ...selected, observedCount: 1, historicalCount: 4 },
+      payload,
+      beta,
+    );
+    assert.equal(result.verification, "unavailable");
+    assert.equal(result.observedCount, undefined);
+    assert.equal(result.historicalCount, undefined);
   }
 });
 
