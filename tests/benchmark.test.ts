@@ -249,6 +249,8 @@ async function boundary(
         configuration: () => ({
           config: {
             ...DEFAULT_CONFIG,
+            batchConcurrency: 1,
+            batchMaxRetries: 0,
             pinnedSkillPaths: [],
             baseUrl,
             ...(batched

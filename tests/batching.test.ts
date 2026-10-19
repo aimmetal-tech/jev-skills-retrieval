@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { zstdDecompressSync } from "node:zlib";
 import type { Skill } from "@earendil-works/pi-coding-agent";
+import type { Fetch } from "@typesafe-ai/sdk";
 import { type BatchAttempt, planBatches } from "../src/batching.ts";
 import { DEFAULT_CONFIG } from "../src/config.ts";
 import { buildRoutingState } from "../src/context.ts";
@@ -17,6 +18,8 @@ import { type Candidate, prepareCatalog } from "../src/selection.ts";
 
 const config = {
   ...DEFAULT_CONFIG,
+  batchConcurrency: 1,
+  batchMaxRetries: 0,
   batchIntervalMs: 0,
   routeTimeoutMs: 2000,
   evaluationTimeoutMs: 1800,
@@ -372,4 +375,475 @@ test("per-batch timeout, whole-phase expiry in pacing, and cancellation never di
   );
   assert.equal(stopped.report.status, "cancelled");
   assert.equal(stopped.report.batches?.completed, 1);
+});
+
+async function requestIds(init: Parameters<Fetch>[1]) {
+  let bytes = Buffer.from(await new Response(init?.body).arrayBuffer());
+  if (new Headers(init?.headers).get("content-encoding") === "zstd")
+    bytes = zstdDecompressSync(bytes);
+  return Object.keys(JSON.parse(bytes.toString()).questions);
+}
+
+function sdkAnswer(candidates: readonly Candidate[]) {
+  const result = answer(candidates);
+  return Response.json({
+    model: result.model,
+    usage: result.usage,
+    answers: Object.fromEntries(
+      candidates.map((candidate) => [
+        candidate.id,
+        { type: "noul", noul: result.probabilities[candidate.id] },
+      ]),
+    ),
+  });
+}
+
+test("bounded SDK workers overlap three batches and refill slots before a slow peer finishes", async () => {
+  const { prepared, settings } = fixture(6);
+  let releaseSlow: () => void = () => {};
+  const slow = new Promise<void>((resolve) => {
+    releaseSlow = resolve;
+  });
+  let active = 0;
+  let peak = 0;
+  let starts = 0;
+  let slowFinished = false;
+  const attempts: BatchAttempt[] = [];
+  const evaluate = createJevEvaluator({
+    getApiKey: () => "fake-only",
+    fetch: async (_url, init) => {
+      const ids = await requestIds(init);
+      starts++;
+      peak = Math.max(peak, ++active);
+      if (starts === 1) {
+        await slow;
+        slowFinished = true;
+      } else {
+        if (starts === 4) {
+          assert.equal(slowFinished, false);
+          releaseSlow();
+        }
+        await delay(3);
+      }
+      active--;
+      return sdkAnswer(
+        prepared.candidates.filter((candidate) => ids.includes(candidate.id)),
+      );
+    },
+  });
+  try {
+    const result = await route(
+      {
+        catalog: prepared.catalog,
+        pinned: [],
+        prepared,
+        state,
+        config: { ...settings, batchConcurrency: 3 },
+        signal: undefined,
+        issues: [],
+        onAttempt: (attempt) => attempts.push(attempt),
+      },
+      evaluate,
+    );
+    assert.equal(result.report.status, "selected");
+    assert.equal(peak, 3);
+    assert.equal(active, 0);
+    assert.equal(starts, 6);
+    assert.equal(result.report.batches?.peakConcurrency, 3);
+    assert.equal(result.report.batches?.coverageComplete, true);
+    assert.equal(
+      new Set(
+        attempts.map(
+          (attempt) => `${attempt.batchId}/${attempt.attemptNumber}`,
+        ),
+      ).size,
+      6,
+    );
+    assert.deepEqual(
+      result.skills.map((skill) => skill.name),
+      ["skill-3"],
+    );
+    assert.deepEqual(result.report.usage, {
+      input_tokens: 120,
+      output_tokens: 12,
+    });
+  } finally {
+    releaseSlow();
+  }
+});
+
+test("SDK 429 recovery shares Retry-After cooldown, reduces concurrency and accounts every attempt once", async () => {
+  const { prepared, settings } = fixture(6);
+  let active = 0;
+  let peakAfterCooldown = 0;
+  let limitedAt = 0;
+  let calls = 0;
+  const starts: number[] = [];
+  const attempts: BatchAttempt[] = [];
+  const progress: string[] = [];
+  const evaluate = createJevEvaluator({
+    getApiKey: () => "fake-only",
+    fetch: async (_url, init) => {
+      const ids = await requestIds(init);
+      calls++;
+      starts.push(performance.now());
+      active++;
+      if (limitedAt && performance.now() >= limitedAt + 40)
+        peakAfterCooldown = Math.max(peakAfterCooldown, active);
+      if (calls === 1) {
+        await delay(3);
+        limitedAt = performance.now();
+        active--;
+        return Response.json(
+          {
+            usage: { input_tokens: 7, output_tokens: 1 },
+            detail: "private-rate-limit-body",
+          },
+          { status: 429, headers: { "retry-after-ms": "40" } },
+        );
+      }
+      await delay(6);
+      active--;
+      return sdkAnswer(
+        prepared.candidates.filter((candidate) => ids.includes(candidate.id)),
+      );
+    },
+  });
+  const result = await route(
+    {
+      catalog: prepared.catalog,
+      pinned: [],
+      prepared,
+      state,
+      config: {
+        ...settings,
+        batchConcurrency: 3,
+        batchMaxRetries: 2,
+        batchRetryBaseMs: 5,
+        batchRetryMaxMs: 10,
+      },
+      signal: undefined,
+      issues: [],
+      onAttempt: (attempt) => attempts.push(attempt),
+      onProgress: (value) =>
+        progress.push(`${value.phase}/${value.concurrency}`),
+    },
+    evaluate,
+  );
+  assert.equal(result.report.status, "selected");
+  assert.equal(calls, 7);
+  assert.equal(attempts.length, 7);
+  assert.equal(
+    attempts.find((attempt) => attempt.httpStatus === 429)?.retryAfterMs,
+    40,
+  );
+  assert(starts.slice(3).every((start) => start - limitedAt >= 39));
+  assert.equal(peakAfterCooldown, 1);
+  assert(progress.includes("cooldown/1"));
+  assert.equal(result.report.batches?.effectiveConcurrency, 1);
+  assert.equal(result.report.batches?.rateLimits, 1);
+  assert.equal(result.report.batches?.retries, 1);
+  assert.equal(result.report.batches?.completed, 6);
+  assert.deepEqual(result.report.usage, {
+    input_tokens: 127,
+    output_tokens: 13,
+  });
+  assert.doesNotMatch(JSON.stringify(result.report), /private-rate-limit-body/);
+});
+
+test("concurrent 429 responses extend a shared cooldown to the longest server delay", async () => {
+  const { prepared, settings } = fixture();
+  let calls = 0;
+  let lastLimit = 0;
+  const starts: number[] = [];
+  const result = await route(
+    {
+      catalog: prepared.catalog,
+      pinned: [],
+      prepared,
+      state,
+      config: {
+        ...settings,
+        batchConcurrency: 3,
+        batchMaxRetries: 1,
+        batchRetryBaseMs: 5,
+        batchRetryMaxMs: 10,
+      },
+      signal: undefined,
+      issues: [],
+    },
+    createJevEvaluator({
+      getApiKey: () => "fake-only",
+      fetch: async (_url, init) => {
+        const ids = await requestIds(init);
+        const call = ++calls;
+        starts.push(performance.now());
+        if (call <= 2) {
+          await delay(call === 1 ? 3 : 6);
+          if (call === 2) lastLimit = performance.now();
+          return Response.json(
+            { usage: { input_tokens: 0, output_tokens: 0 } },
+            {
+              status: 429,
+              headers: { "retry-after-ms": call === 1 ? "10" : "50" },
+            },
+          );
+        }
+        await delay(8);
+        return sdkAnswer(
+          prepared.candidates.filter((candidate) => ids.includes(candidate.id)),
+        );
+      },
+    }),
+  );
+  assert.equal(result.report.status, "selected");
+  assert.equal(calls, 6);
+  assert(starts.slice(3).every((start) => start - lastLimit >= 49));
+  assert.equal(result.report.batches?.rateLimits, 2);
+  assert.equal(result.report.batches?.retries, 2);
+  assert.equal(result.report.batches?.effectiveConcurrency, 1);
+});
+
+test("unknown 429 cost stays unknown after successful retry without blocking complete score coverage", async () => {
+  const { prepared, settings } = fixture(2);
+  let calls = 0;
+  const evaluate = createJevEvaluator({
+    getApiKey: () => "fake-only",
+    fetch: async (_url, init) => {
+      const ids = await requestIds(init);
+      if (++calls === 1) return Response.json({}, { status: 429 });
+      return sdkAnswer(
+        prepared.candidates.filter((candidate) => ids.includes(candidate.id)),
+      );
+    },
+  });
+  const result = await route(
+    {
+      catalog: prepared.catalog,
+      pinned: [],
+      prepared,
+      state,
+      config: {
+        ...settings,
+        batchMaxRetries: 1,
+        batchRetryBaseMs: 5,
+        batchRetryMaxMs: 10,
+      },
+      signal: undefined,
+      issues: [],
+    },
+    evaluate,
+  );
+  assert.equal(calls, 3);
+  assert.equal(result.report.status, "selected");
+  assert.equal(result.report.batches?.coverageComplete, true);
+  assert.equal(result.report.batches?.usageComplete, false);
+  assert.equal(result.report.batches?.knownUsage.input_tokens, 40);
+  assert.deepEqual(result.report.usage, {
+    input_tokens: null,
+    output_tokens: null,
+  });
+});
+
+test("repeated 429 stops at the retry budget and never selects partial scores", async () => {
+  const { prepared, settings } = fixture();
+  let calls = 0;
+  const result = await route(
+    {
+      catalog: prepared.catalog,
+      pinned: [],
+      prepared,
+      state,
+      config: {
+        ...settings,
+        batchMaxRetries: 2,
+        batchRetryBaseMs: 5,
+        batchRetryMaxMs: 10,
+      },
+      signal: undefined,
+      issues: [],
+    },
+    createJevEvaluator({
+      getApiKey: () => "fake-only",
+      fetch: async () => {
+        calls++;
+        return Response.json(
+          { usage: { input_tokens: 7, output_tokens: 1 } },
+          { status: 429 },
+        );
+      },
+    }),
+  );
+  assert.equal(calls, 3);
+  assert.equal(result.report.status, "fallback");
+  assert.equal(result.report.reason, "rate_limit");
+  assert.equal(result.report.batches?.retries, 2);
+  assert.equal(result.report.batches?.completed, 0);
+  assert.equal(result.report.batches?.attempts.length, 3);
+  assert.deepEqual(result.report.usage, { input_tokens: 21, output_tokens: 3 });
+});
+
+test("long Retry-After seconds and HTTP dates obey the existing deadline instead of retrying early", async () => {
+  const { prepared, settings } = fixture();
+  for (const header of ["60", new Date(Date.now() + 60000).toUTCString()]) {
+    let calls = 0;
+    const result = await route(
+      {
+        catalog: prepared.catalog,
+        pinned: [],
+        prepared,
+        state,
+        config: { ...settings, batchMaxRetries: 2, evaluationTimeoutMs: 60 },
+        signal: undefined,
+        issues: [],
+      },
+      createJevEvaluator({
+        getApiKey: () => "fake-only",
+        fetch: async () => {
+          calls++;
+          return Response.json(
+            {},
+            { status: 429, headers: { "Retry-After": header } },
+          );
+        },
+      }),
+    );
+    assert.equal(calls, 1);
+    assert.equal(result.report.reason, "timeout");
+    assert.equal(result.report.timeoutPhase, "evaluation");
+    assert((result.report.batches?.attempts[0]?.retryAfterMs ?? 0) > 50000);
+  }
+});
+
+test("cancellation interrupts cooldown without another dispatch or hanging on Retry-After", {
+  timeout: 1000,
+}, async () => {
+  const { prepared, settings } = fixture();
+  const controller = new AbortController();
+  let calls = 0;
+  const result = await route(
+    {
+      catalog: prepared.catalog,
+      pinned: [],
+      prepared,
+      state,
+      config: { ...settings, batchMaxRetries: 2 },
+      signal: controller.signal,
+      issues: [],
+      onProgress: (progress) => {
+        if (progress.phase === "cooldown") controller.abort();
+      },
+    },
+    createJevEvaluator({
+      getApiKey: () => "fake-only",
+      fetch: async () => {
+        calls++;
+        return Response.json(
+          {},
+          { status: 429, headers: { "Retry-After": "60" } },
+        );
+      },
+    }),
+  );
+  assert.equal(result.report.status, "cancelled");
+  assert.equal(calls, 1);
+  assert.equal(result.report.batches?.attempts.length, 1);
+});
+
+test("fatal concurrent failure drains admitted attempts, preserves known usage and ignores late results", async () => {
+  const { prepared, settings } = fixture();
+  let calls = 0;
+  let releaseLate: () => void = () => {};
+  const late = new Promise<void>((resolve) => {
+    releaseLate = resolve;
+  });
+  const attempts: BatchAttempt[] = [];
+  const pending = route(
+    {
+      catalog: prepared.catalog,
+      pinned: [],
+      prepared,
+      state,
+      config: { ...settings, batchConcurrency: 3, batchIntervalMs: 100 },
+      signal: undefined,
+      issues: [],
+      onAttempt: (attempt) => attempts.push(attempt),
+    },
+    async ({ candidates }) => {
+      const call = ++calls;
+      if (call === 1) {
+        await delay(1);
+        return answer(candidates);
+      }
+      if (call === 2) {
+        await delay(5);
+        const failure = new RoutingFailure(
+          "authentication",
+          "fixture authentication failure",
+          401,
+        );
+        failure.usage = { input_tokens: 7, output_tokens: 1 };
+        throw failure;
+      }
+      await late;
+      return answer(candidates);
+    },
+  );
+  try {
+    const result = await pending;
+    assert.equal(calls, 3);
+    assert.equal(result.report.status, "fallback");
+    assert.equal(result.report.reason, "authentication");
+    assert.equal(attempts.length, 3);
+    assert.equal(result.report.batches?.completed, 1);
+    assert.equal(result.report.batches?.knownUsage.input_tokens, 27);
+    assert.equal(result.report.usage?.input_tokens, null);
+    const before = JSON.stringify(result.report);
+    releaseLate();
+    await delay(5);
+    assert.equal(JSON.stringify(result.report), before);
+    assert.equal(attempts.length, 3);
+  } finally {
+    releaseLate();
+  }
+});
+
+test("an attempt observer failure aborts peers and cannot release a slot for another queued batch", async () => {
+  const { prepared, settings } = fixture(6);
+  let calls = 0;
+  let settled = 0;
+  const result = await route(
+    {
+      catalog: prepared.catalog,
+      pinned: [],
+      prepared,
+      state,
+      config: { ...settings, batchConcurrency: 3 },
+      signal: undefined,
+      issues: [],
+      onAttempt: () => {
+        settled++;
+        if (settled === 1) throw new Error("private-observer-error");
+      },
+    },
+    async ({ candidates, signal }) => {
+      const call = ++calls;
+      if (call === 1) return answer(candidates);
+      return new Promise<EvaluationResult>((_resolve, reject) => {
+        signal.addEventListener(
+          "abort",
+          () => reject(new Error("private-abort-error")),
+          { once: true },
+        );
+      });
+    },
+  );
+  assert.equal(calls, 3);
+  assert.equal(settled, 3);
+  assert.equal(result.report.batches?.attempts.length, 3);
+  assert.equal(result.report.status, "fallback");
+  assert.doesNotMatch(
+    JSON.stringify(result.report),
+    /private-observer-error|private-abort-error/,
+  );
 });

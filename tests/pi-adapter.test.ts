@@ -633,6 +633,50 @@ test("real Responses multi-turn requests separate current skills from retained h
   }
 });
 
+test("Jev 429 backoff is visible and only the recovered complete selection reaches the provider", async () => {
+  const indicator = promptIndicators();
+  let evaluations = 0;
+  const h = await harness(
+    (root) =>
+      createSkillRouterExtension({
+        configuration: () =>
+          configuration(root, {
+            batchIntervalMs: 0,
+            batchRetryBaseMs: 5,
+            batchRetryMaxMs: 10,
+          }),
+        evaluate: async (request) => {
+          if (++evaluations === 1)
+            throw new RoutingFailure("rate_limit", "fixture rate limit", 429);
+          return score(request, ["alpha"]);
+        },
+      }),
+    false,
+    undefined,
+    { mode: "tui", ui: indicator.ui },
+  );
+  try {
+    await h.session.prompt("Task");
+    assert.equal(evaluations, 2);
+    assert.equal(h.payloads.length, 1);
+    assert(
+      indicator.widgets.some((text) => /429 限流退让中.*并发上限 1/.test(text)),
+    );
+    assert.equal(
+      indicator.notices.filter((text) => /收到 HTTP 429/.test(text)).length,
+      1,
+    );
+    assert.match(
+      indicator.statuses.at(-1) ?? "",
+      /先筛选后发送.*自动选择：alpha/,
+    );
+    assert.doesNotMatch(payloadText(h.payloads[0]), /UNIQUE_METADATA_BETA/);
+    assert.deepEqual(h.errors, []);
+  } finally {
+    await h.close();
+  }
+});
+
 test("persistent Jev widget shows credential wait and scoring before the provider runs", async () => {
   const indicator = promptIndicators();
   let enterKey: (value: string) => void = () => {};

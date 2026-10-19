@@ -13,8 +13,9 @@ export interface SkillPromptStatus {
   plannedCount?: number;
   observedCount?: number;
   historicalCount?: number;
-  phase?: "preparing" | "credentials" | "evaluating";
+  phase?: "preparing" | "credentials" | "evaluating" | "backoff";
   completedBatches?: number;
+  batchConcurrency?: number;
   reason?:
     | "existing_session"
     | "missing_input"
@@ -271,8 +272,10 @@ export function formatSkillPromptStatus(
         ? "等待 API key"
         : status.phase === "evaluating"
           ? `Jev 评分中 · 已完成 ${status.completedBatches ?? 0} 批`
-          : "准备技能目录";
-    return `Jev 技能：${phase} · 尚未发送主模型`;
+          : status.phase === "backoff"
+            ? `429 限流退让中 · 已完成 ${status.completedBatches ?? 0} 批`
+            : "准备技能目录";
+    return `Jev 技能：${phase}${status.batchConcurrency === undefined ? "" : ` · 并发上限 ${status.batchConcurrency}`} · 尚未发送主模型`;
   }
   if (status.mode === "blocked")
     return `Jev 技能：未发送主模型 · ${status.reason ? reasons[status.reason] : "任务已停止"}`;

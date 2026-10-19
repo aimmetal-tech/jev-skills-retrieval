@@ -1,4 +1,4 @@
-import { setTimeout as delay } from "node:timers/promises";
+import { setMaxListeners } from "node:events";
 import type { RouterConfig } from "./config.ts";
 import {
   type EvaluationRequest,
@@ -17,6 +17,7 @@ export interface BatchPlan {
 }
 export interface BatchAttempt {
   batchId: number;
+  attemptNumber: number;
   candidateCount: number;
   payloadBytes: number;
   elapsedMs: number;
@@ -26,9 +27,21 @@ export interface BatchAttempt {
   serviceErrorType?: "max_tokens_exceeded";
   model?: string;
   usage: EvaluationResult["usage"];
+  retryAfterMs?: number;
+}
+export interface BatchProgress {
+  phase: "evaluating" | "cooldown";
+  concurrency: number;
+  completed: number;
+  planned: number;
+  retries: number;
 }
 export interface BatchReport {
-  concurrency: 1;
+  concurrency: number;
+  effectiveConcurrency: number;
+  peakConcurrency: number;
+  retries: number;
+  rateLimits: number;
   planned: number;
   completed: number;
   scoredCandidates: number;
@@ -111,15 +124,20 @@ export function batchUsage(report: BatchReport): EvaluationResult["usage"] {
   };
 }
 
-/** Strictly serial: settle, validate and synchronously account before dispatching another. */
+/** Bounded workers share 429 cooldown; every admitted attempt settles before return. */
 export async function evaluateBatches(
   request: EvaluationRequest,
   evaluate: Evaluator,
   config: RouterConfig,
   onAttempt?: (attempt: BatchAttempt) => void,
+  onProgress?: (progress: BatchProgress) => void,
 ): Promise<EvaluationResult & { batches: BatchReport }> {
   const batches: BatchReport = {
-    concurrency: 1,
+    concurrency: config.batchConcurrency,
+    effectiveConcurrency: config.batchConcurrency,
+    peakConcurrency: 0,
+    retries: 0,
+    rateLimits: 0,
     planned: 0,
     completed: 0,
     scoredCandidates: 0,
@@ -130,43 +148,105 @@ export async function evaluateBatches(
   };
   const started = performance.now();
   const parent = new AbortController();
+  setMaxListeners(config.batchConcurrency + 2, parent.signal);
   let phase: "batch" | "evaluation" | undefined;
-  const cancelled = () => parent.abort();
-  request.signal.addEventListener("abort", cancelled, { once: true });
-  if (request.signal.aborted) parent.abort();
+  let terminal: RoutingFailure | undefined;
+  let active = 0;
+  let cooldownUntil = 0;
+  const wakeups = new Set<() => void>();
+  const wake = () => {
+    for (const finish of [...wakeups]) finish();
+  };
   const timeout = () =>
     new RoutingFailure("timeout", "Jev batched evaluation deadline exceeded.");
   const remaining = () => request.timeoutMs - (performance.now() - started);
+  const stop = (
+    failure: RoutingFailure,
+    timeoutPhase?: "batch" | "evaluation",
+  ) => {
+    if (!terminal) {
+      terminal = failure;
+      phase = timeoutPhase;
+    }
+    parent.abort();
+    wake();
+  };
+  const cancelled = () => stop(timeout());
+  request.signal.addEventListener("abort", cancelled, { once: true });
+  if (request.signal.aborted) cancelled();
+  const check = () => {
+    if (!terminal && remaining() <= 0) stop(timeout(), "evaluation");
+    if (terminal) throw terminal;
+  };
+  const progress = () =>
+    onProgress?.({
+      phase: cooldownUntil > performance.now() ? "cooldown" : "evaluating",
+      concurrency: batches.effectiveConcurrency,
+      completed: batches.completed,
+      planned: batches.planned,
+      retries: batches.retries,
+    });
+  const waitForChange = (ms?: number) =>
+    new Promise<void>((resolve) => {
+      let waitTimer: ReturnType<typeof setTimeout> | undefined;
+      const finish = () => {
+        if (waitTimer) clearTimeout(waitTimer);
+        wakeups.delete(finish);
+        parent.signal.removeEventListener("abort", finish);
+        resolve();
+      };
+      if (parent.signal.aborted) {
+        resolve();
+        return;
+      }
+      wakeups.add(finish);
+      parent.signal.addEventListener("abort", finish, { once: true });
+      if (ms !== undefined)
+        waitTimer = setTimeout(
+          finish,
+          Math.max(1, Math.min(ms, remaining(), 2147483647)),
+        );
+    });
+  const acquire = async (readyAt: number) => {
+    while (true) {
+      check();
+      const wait = Math.max(readyAt, cooldownUntil) - performance.now();
+      if (wait > 0) await waitForChange(wait);
+      else if (active < batches.effectiveConcurrency) {
+        active++;
+        batches.peakConcurrency = Math.max(batches.peakConcurrency, active);
+        return;
+      } else await waitForChange();
+    }
+  };
   const timer = setTimeout(
-    () => {
-      phase = "evaluation";
-      parent.abort();
-    },
+    () => stop(timeout(), "evaluation"),
     Math.max(1, request.timeoutMs),
   );
   const probabilities: Record<string, number> = {};
   let model: string | undefined;
   try {
+    check();
     const plans = planBatches(request, config);
     batches.planned = plans.length;
-    for (const [index, plan] of plans.entries()) {
-      if (parent.signal.aborted || remaining() <= 0) throw timeout();
-      if (index > 0 && config.batchIntervalMs > 0) {
-        await delay(config.batchIntervalMs, undefined, {
-          signal: parent.signal,
-        });
-        if (remaining() <= 0 || parent.signal.aborted) throw timeout();
-      }
+    const execute = async (
+      plan: BatchPlan,
+      index: number,
+      attemptNumber: number,
+    ) => {
+      check();
+      if (attemptNumber > 1) batches.retries++;
       const batchStarted = performance.now();
       const available = remaining();
       const allowance = Math.min(config.batchTimeoutMs, available);
-      const limitPhase =
+      const limitPhase: "batch" | "evaluation" =
         config.batchTimeoutMs < available ? "batch" : "evaluation";
       const child = new AbortController();
       let batchTimer: ReturnType<typeof setTimeout> | undefined;
       let abortChild: (() => void) | undefined;
       let result: EvaluationResult | undefined;
       let failure: RoutingFailure | undefined;
+      let timedOut = false;
       try {
         const stopped = new Promise<never>((_resolve, reject) => {
           abortChild = () => {
@@ -177,7 +257,7 @@ export async function evaluateBatches(
           if (parent.signal.aborted) abortChild();
           batchTimer = setTimeout(
             () => {
-              phase = limitPhase;
+              timedOut = true;
               child.abort();
               reject(timeout());
             },
@@ -197,7 +277,6 @@ export async function evaluateBatches(
           performance.now() - batchStarted >= allowance ||
           parent.signal.aborted
         ) {
-          phase ??= limitPhase;
           child.abort();
           throw timeout();
         }
@@ -224,37 +303,45 @@ export async function evaluateBatches(
         batches.completed++;
         batches.scoredCandidates += plan.candidates.length;
       } catch (error) {
-        failure =
-          error instanceof RoutingFailure
+        failure = timedOut
+          ? timeout()
+          : error instanceof RoutingFailure
             ? error
             : new RoutingFailure(
                 "service_error",
                 "Unexpected batch evaluation failure.",
               );
         child.abort();
-        if (failure.code === "timeout") phase ??= limitPhase;
       } finally {
         if (batchTimer) clearTimeout(batchTimer);
         if (abortChild) parent.signal.removeEventListener("abort", abortChild);
       }
       const usage = observedUsage({ usage: result?.usage ?? failure?.usage });
+      if (failure?.code === "rate_limit" && failure.httpStatus === 429)
+        batches.rateLimits++;
       const actualModel = result?.model ?? failure?.actualModel;
       const attempt: BatchAttempt = {
         batchId: index + 1,
+        attemptNumber,
         candidateCount: plan.candidates.length,
         payloadBytes: plan.payloadBytes,
         elapsedMs: performance.now() - batchStarted,
-        status: request.signal.aborted
-          ? "cancelled"
-          : failure
-            ? "failed"
-            : "completed",
+        status:
+          request.signal.aborted ||
+          (terminal !== undefined && failure !== undefined)
+            ? "cancelled"
+            : failure
+              ? "failed"
+              : "completed",
         usage,
         ...(actualModel ? { model: actualModel } : {}),
         ...(failure ? { reason: failure.code } : {}),
         ...(failure?.httpStatus ? { httpStatus: failure.httpStatus } : {}),
         ...(failure?.serviceErrorType
           ? { serviceErrorType: failure.serviceErrorType }
+          : {}),
+        ...(failure?.retryAfterMs !== undefined
+          ? { retryAfterMs: failure.retryAfterMs }
           : {}),
       };
       batches.attempts.push(attempt);
@@ -267,15 +354,109 @@ export async function evaluateBatches(
       batches.coverageComplete =
         batches.scoredCandidates === request.candidates.length;
       onAttempt?.(attempt);
-      if (failure) throw failure;
-      if (!batches.usageComplete && index < plans.length - 1)
-        throw new RoutingFailure(
+      if (
+        !failure &&
+        (usage.input_tokens === null || usage.output_tokens === null) &&
+        !batches.coverageComplete
+      )
+        failure = new RoutingFailure(
           "service_error",
           "Unknown batch usage; further batch requests were stopped.",
         );
-    }
+      return { failure, limitPhase };
+    };
+    let next = 0;
+    const worker = async () => {
+      let readyAt = 0;
+      try {
+        while (!terminal) {
+          const index = next++;
+          const plan = plans[index];
+          if (!plan) return;
+          let attemptNumber = 0;
+          while (!terminal) {
+            await acquire(readyAt);
+            try {
+              check();
+              attemptNumber++;
+              progress();
+              const outcome = await execute(plan, index, attemptNumber);
+              readyAt = performance.now() + config.batchIntervalMs;
+              if (outcome.failure && !terminal) {
+                if (
+                  outcome.failure.code === "rate_limit" &&
+                  outcome.failure.httpStatus === 429
+                ) {
+                  batches.effectiveConcurrency = Math.max(
+                    1,
+                    Math.floor(batches.effectiveConcurrency / 2),
+                  );
+                  const backoff = Math.min(
+                    config.batchRetryMaxMs,
+                    config.batchRetryBaseMs * 2 ** (attemptNumber - 1),
+                  );
+                  const wait = Math.max(
+                    outcome.failure.retryAfterMs ?? 0,
+                    backoff * (1 + Math.random() * 0.2),
+                  );
+                  cooldownUntil = Math.max(
+                    cooldownUntil,
+                    performance.now() + wait,
+                  );
+                  if (attemptNumber > config.batchMaxRetries)
+                    stop(outcome.failure);
+                } else
+                  stop(
+                    outcome.failure,
+                    outcome.failure.code === "timeout"
+                      ? outcome.limitPhase
+                      : undefined,
+                  );
+              }
+              if (!terminal) progress();
+              if (!outcome.failure) break;
+            } catch (error) {
+              stop(
+                error instanceof RoutingFailure
+                  ? error
+                  : new RoutingFailure(
+                      "service_error",
+                      "Batch scheduling stopped.",
+                    ),
+              );
+            } finally {
+              active--;
+              wake();
+            }
+          }
+        }
+      } catch (error) {
+        stop(
+          error instanceof RoutingFailure
+            ? error
+            : new RoutingFailure("service_error", "Batch scheduling stopped."),
+        );
+      }
+    };
+    await Promise.allSettled(
+      Array.from(
+        { length: Math.min(config.batchConcurrency, plans.length) },
+        worker,
+      ),
+    );
+    check();
+    if (!batches.coverageComplete && plans.length)
+      throw new RoutingFailure(
+        "invalid_response",
+        "Incomplete batch coverage.",
+      );
     return {
-      probabilities,
+      probabilities: Object.fromEntries(
+        request.candidates.map((candidate) => [
+          candidate.id,
+          probabilities[candidate.id] as number,
+        ]),
+      ),
       model: model ?? request.model ?? "unknown",
       usage: batchUsage(batches),
       batches,

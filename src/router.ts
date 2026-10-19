@@ -2,6 +2,7 @@ import type { Skill } from "@earendil-works/pi-coding-agent";
 import {
   type BatchAttempt,
   BatchFailure,
+  type BatchProgress,
   type BatchReport,
   batchUsage,
   evaluateBatches,
@@ -55,6 +56,7 @@ export interface RouteRequest {
   /** Local preparation only; credential input/crypto waiting is excluded. */
   preparationMs?: number;
   onAttempt?: (attempt: BatchAttempt) => void;
+  onProgress?: (progress: BatchProgress) => void;
 }
 
 export async function route(
@@ -159,6 +161,7 @@ export async function route(
         evaluate,
         request.config,
         request.onAttempt,
+        request.onProgress,
       );
       result = evaluated;
       batches = evaluated.batches;

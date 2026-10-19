@@ -19,6 +19,10 @@ export interface RouterConfig {
   batchMaxRequests: number;
   batchTimeoutMs: number;
   batchIntervalMs: number;
+  batchConcurrency: number;
+  batchMaxRetries: number;
+  batchRetryBaseMs: number;
+  batchRetryMaxMs: number;
   model?: string;
   baseUrl?: string;
 }
@@ -38,6 +42,10 @@ export const DEFAULT_CONFIG: Readonly<RouterConfig> = Object.freeze({
   batchMaxRequests: 128,
   batchTimeoutMs: 10000,
   batchIntervalMs: 1000,
+  batchConcurrency: 3,
+  batchMaxRetries: 2,
+  batchRetryBaseMs: 1000,
+  batchRetryMaxMs: 30000,
   model: "jev-1.14.0",
 });
 
@@ -59,6 +67,10 @@ const integerKeys = new Set([
   "batchMaxRequests",
   "batchTimeoutMs",
   "batchIntervalMs",
+  "batchConcurrency",
+  "batchMaxRetries",
+  "batchRetryBaseMs",
+  "batchRetryMaxMs",
 ]);
 
 export function loadConfig(cwd: string, agentDir: string): LoadedConfig {
@@ -90,19 +102,20 @@ export function loadConfig(cwd: string, agentDir: string): LoadedConfig {
     for (const [key, item] of Object.entries(value)) {
       const invalid = () => issues.push(`Invalid ${key} in ${file}`);
       if (integerKeys.has(key)) {
-        const isTimeout =
-          key.endsWith("TimeoutMs") || key === "batchIntervalMs";
+        const isMilliseconds = key.endsWith("Ms");
         const minimum =
-          key === "batchIntervalMs"
+          key === "batchIntervalMs" || key === "batchMaxRetries"
             ? 0
-            : key.startsWith("batch") || isTimeout
+            : key.startsWith("batch") || isMilliseconds
               ? 1
               : 0;
         if (
           typeof item !== "number" ||
           !Number.isSafeInteger(item) ||
           item < minimum ||
-          (isTimeout && item > 2147483647)
+          (key === "batchConcurrency" && item > 16) ||
+          (key === "batchMaxRetries" && item > 5) ||
+          (isMilliseconds && item > 2147483647)
         )
           invalid();
         else Object.assign(config, { [key]: item });
@@ -148,5 +161,7 @@ export function loadConfig(cwd: string, agentDir: string): LoadedConfig {
       config.pinnedSkillPaths.map((path) => [skillIdentity(path), path]),
     ).values(),
   ];
+  if (config.batchRetryMaxMs < config.batchRetryBaseMs)
+    issues.push("batchRetryMaxMs must be at least batchRetryBaseMs.");
   return { config, issues };
 }

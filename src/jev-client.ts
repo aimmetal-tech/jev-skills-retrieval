@@ -4,6 +4,7 @@ import {
   type Fetch,
   type NoulQuestion,
   noul,
+  RateLimitError,
   TypeSafeClient,
 } from "@typesafe-ai/sdk";
 import { resolveBaseUrl } from "./base-url.ts";
@@ -22,6 +23,7 @@ export type FailureCode =
 export class RoutingFailure extends Error {
   usage?: EvaluationResult["usage"];
   actualModel?: string;
+  retryAfterMs?: number;
   constructor(
     readonly code: FailureCode,
     message: string,
@@ -175,6 +177,14 @@ export function createJevEvaluator(
       return validateResponse(response, candidates);
     } catch (error) {
       const fail = (failure: RoutingFailure): never => {
+        if (
+          error instanceof RateLimitError &&
+          error.status === 429 &&
+          typeof error.retryAfterMs === "number" &&
+          Number.isFinite(error.retryAfterMs) &&
+          error.retryAfterMs >= 0
+        )
+          failure.retryAfterMs = error.retryAfterMs;
         const body = error instanceof APIError ? error.body : evidence;
         if (body !== undefined) {
           failure.usage = observedUsage(body);

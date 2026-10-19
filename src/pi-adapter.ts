@@ -7,7 +7,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import type { Fetch } from "@typesafe-ai/sdk";
-import type { BatchAttempt } from "./batching.ts";
+import type { BatchAttempt, BatchProgress } from "./batching.ts";
 import { registerJevSkillCommand } from "./commands.ts";
 import { type LoadedConfig, loadConfig } from "./config.ts";
 import { buildRoutingState, type ConversationTurn } from "./context.ts";
@@ -33,6 +33,7 @@ export interface AdapterDependencies {
   configuration?: (cwd: string) => LoadedConfig;
   onReport?: (report: RouteReport) => void;
   onAttempt?: (attempt: BatchAttempt) => void;
+  onBatchProgress?: (progress: BatchProgress) => void;
   onDiagnostic?: (message: string) => void;
   /** Optional benchmark observation; normal extension behavior is unchanged. */
   onRouteStart?: () => void;
@@ -296,6 +297,7 @@ export function createSkillRouterExtension(
           "info",
         );
       }
+      let rateLimitNotified = false;
       const result = await route(
         {
           catalog,
@@ -308,12 +310,22 @@ export function createSkillRouterExtension(
           issues,
           onAttempt: (attempt) => {
             dependencies.onAttempt?.(attempt);
-            if (attempt.status === "completed") {
-              promptStatus = {
-                ...promptStatus,
-                completedBatches: (promptStatus.completedBatches ?? 0) + 1,
-              };
-              showPromptStatus(ctx);
+          },
+          onProgress: (progress) => {
+            dependencies.onBatchProgress?.(progress);
+            promptStatus = {
+              ...promptStatus,
+              phase: progress.phase === "cooldown" ? "backoff" : "evaluating",
+              completedBatches: progress.completed,
+              batchConcurrency: progress.concurrency,
+            };
+            showPromptStatus(ctx);
+            if (progress.phase === "cooldown" && !rateLimitNotified) {
+              rateLimitNotified = true;
+              ctx.ui.notify(
+                "[jev-skills-retrieval] 收到 HTTP 429，已降低并发并等待共享冷却后有限重试；仍受本轮总时限约束。",
+                "warning",
+              );
             }
           },
           ...(reader ? { fileReadTool: reader } : {}),

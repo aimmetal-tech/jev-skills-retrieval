@@ -395,6 +395,10 @@ test("configuration merges project scalars and unions relative pins; bad fields 
         evaluationTimeoutMs: 8000,
         batchMaxRequests: 64,
         batchIntervalMs: 0,
+        batchConcurrency: 4,
+        batchMaxRetries: 1,
+        batchRetryBaseMs: 10,
+        batchRetryMaxMs: 100,
         pinnedSkillPaths: ["../shared/SKILL.md", "./skills/x/SKILL.md"],
       }),
     );
@@ -407,6 +411,10 @@ test("configuration merges project scalars and unions relative pins; bad fields 
     assert.equal(loaded.config.evaluationTimeoutMs, 8000);
     assert.equal(loaded.config.batchMaxRequests, 64);
     assert.equal(loaded.config.batchIntervalMs, 0);
+    assert.equal(loaded.config.batchConcurrency, 4);
+    assert.equal(loaded.config.batchMaxRetries, 1);
+    assert.equal(loaded.config.batchRetryBaseMs, 10);
+    assert.equal(loaded.config.batchRetryMaxMs, 100);
     assert.deepEqual(loaded.config.pinnedSkillPaths, [
       join(root, "shared/SKILL.md"),
       join(root, ".pi/skills/x/SKILL.md"),
@@ -419,13 +427,17 @@ test("configuration merges project scalars and unions relative pins; bad fields 
         evaluationTimeoutMs: 2147483648,
         batchMaxRequests: 0,
         batchIntervalMs: -1,
+        batchConcurrency: 17,
+        batchMaxRetries: 6,
+        batchRetryBaseMs: 0,
+        batchRetryMaxMs: 2147483648,
         minProbability: 2,
         pinnedSkillPaths: ["./skills/x/SKILL.md", null],
         apiKey: "must-not-echo",
       }),
     );
     const invalid = loadConfig(root, agent);
-    assert.equal(invalid.issues.length, 8);
+    assert.equal(invalid.issues.length, 12);
     assert.equal(
       invalid.config.preparationTimeoutMs,
       DEFAULT_CONFIG.preparationTimeoutMs,
@@ -437,6 +449,14 @@ test("configuration merges project scalars and unions relative pins; bad fields 
     assert.equal(invalid.config.pinnedSkillPaths.length, 2);
     assert.equal(invalid.config.model, "jev-user-override");
     assert.doesNotMatch(invalid.issues.join(), /must-not-echo/);
+    await writeFile(
+      join(root, ".pi/skill-router.json"),
+      JSON.stringify({ batchRetryBaseMs: 100, batchRetryMaxMs: 10 }),
+    );
+    assert.match(
+      loadConfig(root, agent).issues.join(),
+      /batchRetryMaxMs must be at least batchRetryBaseMs/,
+    );
     await writeFile(join(root, ".pi/skill-router.json"), "{not-json");
     assert.match(loadConfig(root, agent).issues.join(), /Invalid JSON/);
   } finally {
