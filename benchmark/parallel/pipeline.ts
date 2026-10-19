@@ -133,7 +133,6 @@ export async function pipeline(
         authPath: resolve(homedir(), ".pi/agent/auth.json"),
         modelsPath: resolve(homedir(), ".pi/agent/models.json"),
         allowModelNetwork: false,
-        refreshOnCreate: false,
       });
       if (
         !runtime.isUsingOAuth("openai") ||

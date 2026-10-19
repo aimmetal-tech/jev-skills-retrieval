@@ -140,7 +140,11 @@ to `~/.jev-skill-router/credentials.json`; never to project config or session da
   journal integrity, profile choice and six concurrent real Pi fake-provider calls.
   Prior code is preserved at git b113211 and an ignored source archive under
   `outputs/benchmark/source-archives/`; old evidence is never imported or edited.
-  User explicitly authorized unknown-cost recording followed by bounded backoff
+  Parallel native-account preflight must restore the local catalog with the
+  default offline refresh (allowModelNetwork:false). refreshOnCreate:false leaves
+  the model/auth snapshot uninitialized and cannot establish unavailability.
+  Legacy protocol 2 (separate from the new parallel protocol above): the user
+  explicitly authorized unknown-cost recording followed by bounded backoff
   retries in this persistent benchmark: `--continue-unknown-usage` retains unknown
   totals, retries only 429/529/transport failures up to 3 additional attempts with
   5/15/30s backoff (honoring server cooldowns up to 60s). Retry counts persist.
