@@ -143,6 +143,14 @@ to `~/.jev-skill-router/credentials.json`; never to project config or session da
   Parallel native-account preflight must restore the local catalog with the
   default offline refresh (allowModelNetwork:false). refreshOnCreate:false leaves
   the model/auth snapshot uninitialized and cannot establish unavailability.
+  Observed 2026-10-19 live calibration is isolated at
+  `outputs/benchmark/parallel/per-group-20261019-104926/`: both 40-trial profiles
+  qualified; 3=158.24 trials/h, 5=273.20 trials/h, so full-5 started automatically.
+  Root calibration-verification.json/selection.json and calibration-throughput
+  PNG/SVG preserve the measured choice, separately from full accuracy results.
+  Frozen parallel source is bb2391e, archived under source-archives; later evidence
+  documentation does not alter the frozen source fingerprint. Formal attempts
+  retain unknown costs even after a successful retry.
   Legacy protocol 2 (separate from the new parallel protocol above): the user
   explicitly authorized unknown-cost recording followed by bounded backoff
   retries in this persistent benchmark: `--continue-unknown-usage` retains unknown

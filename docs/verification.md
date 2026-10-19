@@ -366,3 +366,29 @@ psmux 仅保护终端断开，机器重启后仍需从本轮检查点恢复。Wi
 官方Pi文档与安装源码确认getModel读取的是已恢复快照，空快照不能判断账户不可用。
 改为默认离线refresh且allowModelNetwork:false，与原正常benchmark路径一致。
 该启动目录无模型请求，独立保留，不复用为修复后的新校准结果。
+
+### 已完成真实校准并自动启动全量
+
+独立根目录：`outputs/benchmark/parallel/per-group-20261019-104926/`。
+冻结代码bb2391e，源归档SHA256为
+`2e99ecda378f1c4762bb446fb28c8a4b980c4ee1af34fcf5a1c0e236445dfb8f`。
+
+| 每组并发 | trial | 阶段历时 | 吞吐/trial每小时 | HTTP尝试 | 已知Token |
+|---|---:|---:|---:|---:|---:|
+| 3 | 40/40 | 909996ms | 158.2425 | 1658 | 83703170 |
+| 5 | 40/40 | 527092ms | 273.1971 | 1645 | 81206977 |
+
+共80个真实trial、3303次HTTP，两个阶段均无429/529、熔断、未知用量、恢复或本地响应重放。
+Pi实际返回模型均为gpt-6-luna，OAuth/Responses/medium保持一致；Jev均为jev-1.14.0，
+每档20条插件查询均完成6006候选的全量评分。观测准入峰值为Pi6/Jev3及Pi10/Jev5。
+5档整体吞吐提高72.6446%，满足已冻结20%规则，因此自动选择每组5并在full-5/开始8784条新全量。
+
+这是容量校准，不是完整准确率结论。3档包含首次worker加载，两个档位先后运行，
+缓存读Token分别39158528/40654080；启动、缓存与服务波动未完全控制，不把吞吐差异全部归因于并发。
+本轮完整证据为根selection.json、calibration-verification.json、各阶段coordinator.jsonl与reports。
+额外导出根calibration-throughput.png/.svg，不与正式原生/插件对比图混淆。
+
+新全量首批出现一次Jev无HTTP状态的传输/中断失败，第二次尝试HTTP200且usage完整，
+原失败用量仍未知并保留，不因重试成功归零。正式轮当时继续运行、没有熔断；
+后续状态应读取实时pipeline.json与full-5/progress.json，不能把本次启动验收当作全量完成。
+旧三个运行的results.jsonl哈希再次核对，全部未变，记录见isolation-verification.json。
