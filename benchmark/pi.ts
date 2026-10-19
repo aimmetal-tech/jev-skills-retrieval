@@ -31,6 +31,17 @@ import {
 } from "./profile.ts";
 import { emptyCounts, type Group, type Suite, type Trial } from "./types.ts";
 
+export interface TrialDurability
+  extends Pick<
+    TrialCheckpoint,
+    "stats" | "fetch" | "final" | "finish" | "onChange" | "afterCommit"
+  > {
+  readonly manifest: { sessionId: string; resumes: number };
+  readonly elapsedMs: number;
+  readonly protocolVersion?: 2 | 3;
+  shouldPause?: () => string | undefined;
+}
+
 export interface PiTrialOptions {
   suite: Suite;
   caseId: string;
@@ -61,21 +72,31 @@ export interface PiTrialOptions {
     policy: RecoveryPolicy;
     afterCommit?: (kind: "pi" | "jev", sequence: number) => Promise<void>;
   };
+  durability?: TrialDurability;
+  routerConfig?: Partial<import("../src/config.ts").RouterConfig>;
 }
 
 export async function runPiTrial(options: PiTrialOptions): Promise<Trial> {
   const { budget } = options;
-  const durable = options.recovery
-    ? new TrialCheckpoint(
-        options.recovery.directory,
-        options.recovery.scope,
-        budget,
-        options.recovery.policy,
-      )
-    : undefined;
+  const durable: TrialDurability | undefined =
+    options.durability ??
+    (options.recovery
+      ? new TrialCheckpoint(
+          options.recovery.directory,
+          options.recovery.scope,
+          budget,
+          options.recovery.policy,
+        )
+      : undefined);
   if (durable) {
     const final = durable.final();
-    if (final) return final;
+    if (final) {
+      if (durable.protocolVersion === 3) {
+        if (final.recovery) final.recovery.resumes = durable.manifest.resumes;
+        durable.finish(final);
+      }
+      return final;
+    }
     durable.afterCommit = options.recovery?.afterCommit;
   }
   const started = performance.now();
@@ -117,7 +138,7 @@ export async function runPiTrial(options: PiTrialOptions): Promise<Trial> {
       row.requests = stats.requests;
       row.elapsedMs = durable.elapsedMs;
       row.recovery = {
-        schemaVersion: 2,
+        schemaVersion: durable.protocolVersion ?? 2,
         resumes: durable.manifest.resumes,
         replayed: stats.replayed,
         unknownRequests: stats.unknownRequests,
@@ -133,7 +154,10 @@ export async function runPiTrial(options: PiTrialOptions): Promise<Trial> {
   if (durable) {
     durable.onChange = checkpoint;
     checkpoint();
-    if (durable.elapsedMs >= budget.limits.taskTimeoutMs) {
+    if (
+      !durable.shouldPause &&
+      durable.elapsedMs >= budget.limits.taskTimeoutMs
+    ) {
       row.status = "timeout";
       checkpoint();
       durable.finish(row);
@@ -198,6 +222,7 @@ export async function runPiTrial(options: PiTrialOptions): Promise<Trial> {
           config: {
             ...(durable ? PERSISTENT_ROUTER_CONFIG : BENCHMARK_ROUTER_CONFIG),
             pinnedSkillPaths: [],
+            ...options.routerConfig,
           },
           issues: [],
         }),
@@ -481,13 +506,20 @@ export async function runPiTrial(options: PiTrialOptions): Promise<Trial> {
       checkpoint();
     }
   });
-  const timer = setTimeout(
-    () => {
-      row.status = "timeout";
-      void session.abort();
-    },
-    Math.max(1, budget.limits.taskTimeoutMs - (durable?.elapsedMs ?? 0)),
-  );
+  const timer = durable?.shouldPause
+    ? setInterval(() => {
+        if (durable.shouldPause?.()) {
+          row.status = "budget";
+          void session.abort();
+        }
+      }, 100)
+    : setTimeout(
+        () => {
+          row.status = "timeout";
+          void session.abort();
+        },
+        Math.max(1, budget.limits.taskTimeoutMs - (durable?.elapsedMs ?? 0)),
+      );
   try {
     await session.prompt(options.prompt);
     if (!assistantMessages && row.status === "completed")

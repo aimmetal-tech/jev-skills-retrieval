@@ -46,6 +46,8 @@ export interface Trial {
   };
   responseModels: string[];
   status:
+    | "running"
+    | "paused"
     | "completed"
     | "provider_error"
     | "timeout"
@@ -62,11 +64,12 @@ export interface Trial {
   routeReports: RouteReport[];
   jevAttempts?: BatchAttempt[];
   recovery?: {
-    schemaVersion: 2;
+    schemaVersion: 2 | 3;
     resumes: number;
     replayed: { pi: number; jev: number };
     unknownRequests: number;
   };
+  parallelTiming?: import("./parallel/protocol.ts").TimingState;
   pi: Counts;
   jev: Counts;
   requests: { pi: number; jev: number };

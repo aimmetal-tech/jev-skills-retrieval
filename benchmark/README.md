@@ -223,3 +223,81 @@ npm run benchmark -- --report --output runs/full-001
 `checkpoint.ts` 负责逐请求持久化与恢复；`recovery.ts` 负责互斥锁和结果日志；
 `psmux.ps1` 负责独立持久会话、固定运行参数和控制台记录。
 来源锁、依赖锁与安全阻断清单在本目录。
+
+## 已确认的双 psmux 并行协议 3
+
+该协议独立于已停止的旧轮，用户已确认实施、80 trial 校准，以及达标后自动启动新全量。
+先完成 `npm run check`，再启动；不将旧轮 451 条、失败新轮、校准或正式结果互相合并。
+
+```powershell
+pwsh -NoLogo -NoProfile -File benchmark/parallel/start.ps1 -Output parallel/<fresh-id>
+npm run benchmark:parallel -- --output parallel/<fresh-id> --status
+```
+
+启动器隐藏运行一个本地协调器，并建立同一独立 psmux namespace 下的 `native` 和
+`router` 两个会话。namespace 与日志位置见本轮 `psmux.json`。分别查看：
+
+```powershell
+psmux -L <psmux.json中的namespace> attach -t native
+psmux -L <psmux.json中的namespace> attach -t router
+```
+
+每组各有 N=3 或5个任务名额，OpenAI 请求理论峰值为2N，Jev峰值N。
+各查询独立 Pi 内存会话，内部 Jev 仍串行，保留查询本地1秒间隔。
+这不是所有任务共享的全局1秒闸门；协调器按组限制在途请求、共享服务冷却和总预算。
+原生组单独只需原生 OAuth，插件组还需 `TYPESAFE_API_KEY`。凭据仍从原处复用，不复制。
+
+校准按查询长度分为20层，以固定seed20261019哈希挑选每层一条。3档和5档同20条，
+两组各执行一次，共80个trial；每档都进行新的真实调用，不使用另一档的本地响应重放。
+固定模型仍为 `openai/gpt-6-luna`、medium；数据、完整6006候选、阈值和Top5保持一致。
+依据旧样本，80个trial包含约3300次HTTP而不是80次，实际次数与重试单独记账。
+
+3档必须完整结束、无熔断/耗尽/人工恢复，且429/529不超过实际尝试的1%，否则停止排障。
+5档采用同一条件，且整体吞吐至少比3档高20%才选5，否则使用合格3档。
+吞吐按整个阶段历时计算，包含排队和退避，另列缓存变化。校准不用于证明准确率或长期配额。
+符合规则后在全新 `full-3/` 或 `full-5/` 自动开始4392×2个trial；不会重用校准响应。
+完整SkillsBench仍被隔离项阻断，本流水线仅运行SkillRet。
+
+每个恢复轮最多首次+5次尝试。重试白名单为408/429/500/502/503/504/529、网络异常和超时；
+退避5/10/20/40/80秒加0–20%正向抖动，尊重更长的服务端Retry-After。
+429/529/503或服务端明确等待形成provider共享冷却，等待不占HTTP名额。
+SDK内置重试关闭；不通过多层重试放大次数。永久错误与有效200缺失usage会暂停并报告。
+耗尽后Jev暂停插件组、Pi暂停两组；普通重启保留次数，不能绕过上限。
+
+```powershell
+npm run benchmark:parallel -- --output parallel/<id> --resume-provider jev --new-cycle
+npm run benchmark:parallel -- --output parallel/<id> --extend-job router/q-xxxxx --work-minutes 10 --route-minutes 10 --online-minutes 30
+npm run benchmark:parallel -- --output parallel/<id> --stop
+```
+
+`--new-cycle` 是明确人工授权，可使历史累计超过6次；旧次数、已知与未知用量均保留。
+预算追加只作用于已暂停任务，已消耗时间不清零。没有相应指令不会自行重开恢复轮或加时。
+停机时停止新准入并通知各worker取消，在途不确定调用保留为未知；后台pane可保留。
+
+单次网络超时Jev10秒/Pi120秒。路由有效工作600秒、任务1200秒、累计在线3600秒。
+失败尝试网络时间照计；排队、退避、共享冷却分列且互不重复计时；正常查询内节奏仍计工作。
+人工暂停和进程离线不扣累计在线预算，完整自然历时另报。五次是上限，不保证整体预算允许用满。
+校准两档共用40000 HTTP保护上限，正式两组合计700000；已知Token阈值100000000000。
+这些是运行保护而非账单封顶，未知成本不被归零，总Token不完整时不声称精确效率提升。
+
+`coordinator.jsonl` 为单写者fsync事件账本，包含发送前预留、结算、周期和人工操作。
+各trial的checkpoint保留成功真实响应及语义/正文哈希，不保存认证头；只在同一实验恢复时回放。
+派生 `results.jsonl` 只包含已完成结果；报告还纳入运行/暂停trial的已观察成本并标为临时数据。
+JSON/CSV约5秒或完成事件后更新，图表/HTML约60秒及暂停/结束时更新。
+
+各阶段的 `run.json`、`summary.json`、`progress.json`、图表和group trial目录分别隔离。
+根 `pipeline.json` 记录当前阶段、指纹、worker状态和总保护；`selection.json` 保存选档证据。
+psmux活着不代表worker活着；进程退出和协调器失联都会明确暂停，不能继续绕过共享账本发请求。
+
+协调器重启先停旧worker，再明确恢复基础设施，随后在两个已有pane中分别启动对应worker：
+
+```powershell
+pwsh -NoProfile -File benchmark/parallel/start.ps1 -Output parallel/<id> -Resume
+npm run benchmark:parallel -- --output parallel/<id> --recover-infrastructure
+node --import tsx benchmark/parallel/worker.ts --pipeline <本轮绝对目录> --group native
+# 另一个 pane 使用 --group router
+```
+
+同一实验恢复要求源码指纹完全一致。跨进程租约防止旧、新worker双跑。
+协调器中断或人工干预后的校准不再作为无故障选档证据；不能据此抹除原失败。
+旧版源代码已冻结在git提交b113211，并保留忽略的source archive，旧证据保持原目录。

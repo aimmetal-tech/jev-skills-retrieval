@@ -25,6 +25,8 @@ export interface AdapterDependencies {
   onReport?: (report: RouteReport) => void;
   onAttempt?: (attempt: BatchAttempt) => void;
   onDiagnostic?: (message: string) => void;
+  /** Optional benchmark observation; normal extension behavior is unchanged. */
+  onRouteStart?: () => void;
 }
 
 export function createSkillRouterExtension(
@@ -109,6 +111,7 @@ export function createSkillRouterExtension(
         return;
       }
       if (ctx.signal?.aborted) return;
+      dependencies.onRouteStart?.();
       const preparationStarted = performance.now();
       const loaded = configuration(ctx.cwd);
       historyLimit = loaded.config.historyMaxTurns;

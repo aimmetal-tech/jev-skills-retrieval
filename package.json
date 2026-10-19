@@ -36,6 +36,7 @@
     "test": "tsx --test tests/*.test.ts",
     "eval": "tsx eval/run.ts",
     "benchmark": "tsx benchmark/run.ts",
+    "benchmark:parallel": "tsx benchmark/parallel/pipeline.ts",
     "benchmark:prepare": "python benchmark/prepare.py",
     "benchmark:preflight": "tsx benchmark/run.ts --preflight",
     "benchmark:verify": "tsx benchmark/selftest.ts",

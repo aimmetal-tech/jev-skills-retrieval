@@ -97,6 +97,49 @@ to `~/.jev-skill-router/credentials.json`; never to project config or session da
   by default; `-Resume` is explicit and only supports identical protocol-2 code,
   model, suite and task guards. Never import legacy evidence into a new run.
   psmux protects terminal disconnects, not reboot; checkpoints support later restart.
+  User confirmed a separate parallel protocol 3, not an alteration or resumption of
+  the stopped protocol-2 runs. `benchmark/parallel/` contains `protocol.ts` (frozen
+  limits, seeded query-length calibration), `coordinator.ts` (single fsynced journal
+  writer, group leases, shared costs/cooldowns/service pauses/manual recovery),
+  `ipc.ts` (local named pipe on Windows / Unix socket), `timing.ts` (disjoint work,
+  queue, backoff, cooldown and cumulative online time), `checkpoint.ts` (real paid
+  response replay in the same experiment), `worker.ts` (one process per group and
+  a task pool), `reporting.ts` (single report writer and frozen selection rule),
+  `pipeline.ts` (calibrate 3 then 5, select, automatically start a fresh full run),
+  `start.ps1` (hidden coordinator launch), `session.ps1` (two detached psmux group
+  sessions). Per-group task limits are independent: N=3/5 means up to 6/10 Pi
+  requests account-wide and 3/5 Jev requests. Per-query Jev batches stay serial,
+  with query-local 1s pacing; no global 1s gate that accidentally serializes pools.
+  SDK retries remain disabled. Protocol 3 performs first+5 attempts, exponential
+  5/10/20/40/80s plus 0–20% positive jitter, honors longer server Retry-After,
+  shares provider cooldowns and releases HTTP slots while waiting. Retryable
+  codes: 408/429/500/502/503/504/529 and network/timeout failures. Exhaustion
+  pauses the affected provider (Pi both groups; Jev router only). Ordinary restart
+  never resets counts; explicit operator new cycles retain all prior costs.
+  Actual attempts retain Jev10s/Pi120s timeouts. Route work=600s, trial work=1200s,
+  cumulative online=3600s; queue/backoff/cooldown are separate, failed actual work
+  is charged. Offline/user-pause time is excluded from online, natural elapsed is
+  retained. Guard exhaustion pauses rather than fabricating a completed failure.
+  Only operator commands append budget or retry cycles, never erase history.
+  Pi adapter's optional onRouteStart observer and Pi trial's durability/config
+  seams leave ordinary production timeouts, retry policy and behavior unchanged;
+  the parallel harness externally enforces work limits under a 1h wall safeguard.
+  Calibration is fixed 20 query-length strata with seed 20261019: 20 queries × 2
+  groups × 2 profiles =80 real trials. Both profiles use fresh calls, not cross-run
+  response replay. A qualifying profile must finish, have no circuit break/manual
+  recovery, and 429/529 fraction <=1%. Choose 5 only if eligible and >=20% faster;
+  otherwise eligible 3. Invalid 3 stops the pipeline. Full phase is fresh 8784
+  trials. Combined calibration HTTP guard=40000; full HTTP guard=700000; known
+  token guard=100000000000. Tokens remain a response-boundary stop, not a bill cap.
+  `coordinator.jsonl` is authoritative; `results.jsonl` is a derived completed
+  view. Partial running/paused costs are included in provisional summary reports.
+  Reports refresh every <=60s and on stop/end. Worker death preserves uncertain
+  reservations; coordinator loss is fail-closed and requires explicit recovery.
+  `tests/parallel.test.ts` and `parallel-pi.test.ts` cover IPC limits, shared budget,
+  cooldown scopes, six attempts/manual cycles, replay, independent clocks, restart
+  journal integrity, profile choice and six concurrent real Pi fake-provider calls.
+  Prior code is preserved at git b113211 and an ignored source archive under
+  `outputs/benchmark/source-archives/`; old evidence is never imported or edited.
   User explicitly authorized unknown-cost recording followed by bounded backoff
   retries in this persistent benchmark: `--continue-unknown-usage` retains unknown
   totals, retries only 429/529/transport failures up to 3 additional attempts with
@@ -244,6 +287,17 @@ conversation history. `/jev-skill status` displays source/presence, never key va
 - `npm run benchmark:verify`: explicit harmless Docker/BenchFlow/Pi integration
   using loopback fake providers, no public CVE tasks and no real model calls.
   Python dependency setup and resume/report commands are in benchmark/README.md.
+- `pwsh -NoProfile -File benchmark/parallel/start.ps1 -Output parallel/<fresh-id>`:
+  explicitly authorized live parallel pipeline. Creates two independent psmux
+  sessions plus a hidden coordinator; calibrates before automatic fresh full run.
+  `npm run benchmark:parallel -- --output parallel/<id> --status` reads live IPC;
+  `--stop` closes admission and cancels active trials while preserving evidence.
+  `--resume-provider pi|jev --new-cycle` is explicit manual retry authorization;
+  `--extend-job <group/query> --work-minutes N --route-minutes N --online-minutes N`
+  appends paused-task guards. `start.ps1 -Resume` restarts coordinator fail-closed;
+  stop old workers, use `--recover-infrastructure`, then explicitly restart each
+  group worker in its existing session. No automatic recovery loop resets limits.
+  Full instructions and root/phase output identities are in benchmark/README.md.
 - `npm run benchmark:check`: locked Python Ruff checks/formatting and meaningful
   no-network preparation/compatibility/verifier-failure tests in the dedicated Python environment.
 - `npm run eval -- --live`: paid Jev evaluation with `TYPESAFE_API_KEY`; default
