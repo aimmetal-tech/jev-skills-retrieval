@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  formatSkillPromptNames,
   formatSkillPromptStatus,
   type SkillPromptStatus,
   verifySkillPrompt,
@@ -15,6 +16,58 @@ const selected: SkillPromptStatus = {
   catalogCount: 3,
   plannedCount: 1,
 };
+
+test("selected names distinguish automatic and pinned skills and remain planned until verified", () => {
+  const names = {
+    automatic: ["hf-cli", "tavily-search"],
+    pinned: ["项目约定"],
+  };
+  const matched = {
+    ...selected,
+    plannedCount: 3,
+    observedCount: 3,
+    verification: "matched" as const,
+  };
+  assert.deepEqual(formatSkillPromptNames(matched, names), [
+    "自动选择：hf-cli、tavily-search",
+    "固定项：项目约定",
+  ]);
+  assert.match(
+    formatSkillPromptStatus(matched, names),
+    /自动选择：hf-cli、tavily-search.*固定项：项目约定.*请求/,
+  );
+  for (const verification of ["pending", "unavailable", "mismatch"] as const) {
+    assert.deepEqual(
+      formatSkillPromptNames({ ...selected, verification }, names),
+      ["计划自动选择：hf-cli、tavily-search", "计划固定项：项目约定"],
+    );
+  }
+  assert.deepEqual(
+    formatSkillPromptNames(matched, { automatic: [], pinned: [] }),
+    ["自动选择：无"],
+  );
+  assert.deepEqual(
+    formatSkillPromptNames({ ...matched, mode: "fallback" }, names),
+    ["固定项：项目约定"],
+  );
+  assert.deepEqual(
+    formatSkillPromptNames({ ...matched, mode: "blocked" }, names),
+    [],
+  );
+});
+
+test("displayed skill names cannot inject terminal controls or extra lines", () => {
+  const lines = formatSkillPromptNames(
+    { ...selected, verification: "matched" },
+    {
+      automatic: [" hf-cli\n", "unsafe\x1b[31m\u202ename\u2028next"],
+      pinned: [],
+    },
+  );
+  assert.equal(lines.length, 1);
+  assert.match(lines[0] ?? "", /hf-cli/);
+  assert.doesNotMatch(lines[0] ?? "", /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u);
+});
 
 test("prompt verification reads known system fields and ignores user and tool content", () => {
   for (const payload of [

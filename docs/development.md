@@ -68,3 +68,9 @@ SkillsBench 的 `fix-druid-loophole-cve/verifier/test_outputs.py` 被安全软�
 同轮工具续跑去重，安全会话条目不含技能正文、prompt 或 key。
 纯解析测试覆盖 Completions/Responses/Anthropic system 字段、同数量目录替换及未知格式。
 未执行真实宿主终端的人工截图验收，未调用线上模型。
+
+2026-10-19 所选名称显示：`npm run check` 的类型、Lint、113 项测试及构建通过；
+`npm run verify:package` 的 46 文件运行包通过真实 Pi loader 验证。
+名称在状态栏、widget、通知及状态命令中显示，测试覆盖自动/固定分类、零命中、
+回退不冒充自动选择、跨任务更新、未核验时的计划标记及终端控制字符清理。
+持久化诊断仍只有枚举与计数；本轮未调用线上模型。

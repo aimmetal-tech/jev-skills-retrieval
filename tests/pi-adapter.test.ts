@@ -308,6 +308,24 @@ test("visible Jev indicators distinguish filtered, zero-hit, fallback and disabl
       );
       assert.match(indicator.statuses.at(-1) ?? "", expected);
       assert.match(indicator.widgets.at(-1) ?? "", expected);
+      if (scenario === "filtered") {
+        assert.match(
+          indicator.statuses.at(-1) ?? "",
+          /自动选择：alpha.*固定项：pinned/,
+        );
+        assert.match(
+          indicator.widgets.at(-1) ?? "",
+          /自动选择：alpha\s*\n固定项：pinned/,
+        );
+      } else if (scenario === "zero") {
+        assert.match(
+          indicator.widgets.at(-1) ?? "",
+          /自动选择：无\s*\n固定项：pinned/,
+        );
+      } else {
+        assert.doesNotMatch(indicator.widgets.at(-1) ?? "", /自动选择：/);
+        assert.match(indicator.widgets.at(-1) ?? "", /固定项：pinned/);
+      }
       assert.match(indicator.statuses.at(-1) ?? "", /发送前已核验/);
       assert.equal(evaluations, scenario === "disabled" ? 0 : 1);
       assert.equal(
@@ -323,6 +341,7 @@ test("visible Jev indicators distinguish filtered, zero-hit, fallback and disabl
       if (scenario === "filtered") assert.match(text, /UNIQUE_METADATA_ALPHA/);
       await h.session.prompt("/jev-skill status");
       assert.match(indicator.notices.at(-1) ?? "", expected);
+      assert.match(indicator.notices.at(-1) ?? "", /固定项：pinned/);
       const records = h.session.sessionManager
         .getBranch()
         .filter(
@@ -332,12 +351,48 @@ test("visible Jev indicators distinguish filtered, zero-hit, fallback and disabl
       assert.equal(records.length, 1);
       assert.doesNotMatch(
         JSON.stringify(records),
-        /UNIQUE_METADATA|local-test-only|Task/,
+        /UNIQUE_METADATA|local-test-only|Task|"alpha"|"pinned"/,
       );
       assert.deepEqual(h.errors, []);
     } finally {
       await h.close();
     }
+  }
+});
+
+test("skill-name indicators replace the previous request's selection and commands show the current full list", async () => {
+  const indicator = promptIndicators();
+  let calls = 0;
+  const h = await harness(
+    (root) =>
+      createSkillRouterExtension({
+        configuration: () => configuration(root),
+        evaluate: async (request) =>
+          score(request, ++calls === 1 ? ["alpha"] : ["beta"]),
+      }),
+    false,
+    undefined,
+    { mode: "tui", ui: indicator.ui },
+  );
+  try {
+    await h.session.prompt("First task");
+    assert.match(indicator.widgets.at(-1) ?? "", /自动选择：alpha/);
+    await h.session.prompt("Next task");
+    assert.match(indicator.widgets.at(-1) ?? "", /自动选择：beta/);
+    assert.doesNotMatch(indicator.widgets.at(-1) ?? "", /alpha/);
+    assert.match(indicator.statuses.at(-1) ?? "", /自动选择：beta/);
+    for (const command of ["/jev-skill status", "/skill-router-status"]) {
+      await h.session.prompt(command);
+      assert.match(
+        indicator.notices.at(-1) ?? "",
+        /自动选择：beta.*固定项：pinned/,
+      );
+      assert.doesNotMatch(indicator.notices.at(-1) ?? "", /alpha/);
+    }
+    assert.equal(calls, 2);
+    assert.deepEqual(h.errors, []);
+  } finally {
+    await h.close();
   }
 });
 

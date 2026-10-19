@@ -24,6 +24,32 @@ export interface SkillPromptStatus {
     | "cancelled";
 }
 
+/** UI-only names kept separate from the persisted counter-only status. */
+export interface SkillPromptNames {
+  automatic: readonly string[];
+  pinned: readonly string[];
+}
+
+export function formatSkillPromptNames(
+  status: SkillPromptStatus,
+  names?: SkillPromptNames,
+): string[] {
+  if (!names || !["filtered", "fixed_only", "fallback"].includes(status.mode))
+    return [];
+  const display = (items: readonly string[]) =>
+    items
+      .map((name) => name.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, " ").trim())
+      .filter(Boolean)
+      .join("、");
+  const prefix = status.verification === "matched" ? "" : "计划";
+  const lines: string[] = [];
+  if (status.mode === "filtered")
+    lines.push(`${prefix}自动选择：${display(names.automatic) || "无"}`);
+  if (names.pinned.length || status.mode === "fixed_only")
+    lines.push(`${prefix}固定项：${display(names.pinned) || "无"}`);
+  return lines;
+}
+
 function record(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
@@ -119,7 +145,10 @@ const reasons: Record<NonNullable<SkillPromptStatus["reason"]>, string> = {
   cancelled: "任务已取消",
 };
 
-export function formatSkillPromptStatus(status: SkillPromptStatus): string {
+export function formatSkillPromptStatus(
+  status: SkillPromptStatus,
+  names?: SkillPromptNames,
+): string {
   if (status.mode === "waiting")
     return "Jev 技能：已启用 · 等待任务（启动 Skills 为本地清单）";
   if (status.mode === "routing") {
@@ -160,5 +189,6 @@ export function formatSkillPromptStatus(status: SkillPromptStatus): string {
         : status.verification === "not_sent"
           ? "尚未发送主模型"
           : "请求格式无法核验";
-  return `Jev 技能：${label}${counts} · ${check}${status.reason ? ` · ${reasons[status.reason]}` : ""}`;
+  const selections = formatSkillPromptNames(status, names);
+  return `Jev 技能：${label}${selections.length ? ` · ${selections.join(" · ")}` : ""}${counts} · ${check}${status.reason ? ` · ${reasons[status.reason]}` : ""}`;
 }

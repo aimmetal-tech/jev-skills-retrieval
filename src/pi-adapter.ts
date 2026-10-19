@@ -15,7 +15,9 @@ import type { CredentialStore } from "./credential-store.ts";
 import { JevCredentials } from "./credentials.ts";
 import { createJevEvaluator, type Evaluator } from "./jev-client.ts";
 import {
+  formatSkillPromptNames,
   formatSkillPromptStatus,
+  type SkillPromptNames,
   type SkillPromptStatus,
   verifySkillPrompt,
 } from "./prompt-status.ts";
@@ -64,16 +66,21 @@ export function createSkillRouterExtension(
       verification: "not_sent",
     };
     let lastPromptNotice: string | undefined;
+    let promptNames: SkillPromptNames = { automatic: [], pinned: [] };
     const showPromptStatus = (ctx: ExtensionContext) => {
       ctx.ui.setStatus(
         "jev-skill-router",
-        formatSkillPromptStatus(promptStatus),
+        formatSkillPromptStatus(promptStatus, promptNames),
       );
       ctx.ui.setWidget(
         "jev-skills-retrieval",
         () =>
           new Text(
-            `[jev-skills-retrieval]\n${formatSkillPromptStatus(promptStatus)}`,
+            [
+              "[jev-skills-retrieval]",
+              formatSkillPromptStatus(promptStatus),
+              ...formatSkillPromptNames(promptStatus, promptNames),
+            ].join("\n"),
             0,
             0,
           ),
@@ -88,6 +95,7 @@ export function createSkillRouterExtension(
       configuration,
       getReport: () => lastReport,
       getPromptStatus: () => promptStatus,
+      getPromptNames: () => promptNames,
     });
     const blockForMissingKey = (ctx: ExtensionContext, report: RouteReport) => {
       lastReport = { ...report, status: "blocked", reason: "missing_key" };
@@ -115,6 +123,7 @@ export function createSkillRouterExtension(
       expectedMetadata = undefined;
       lastReport = undefined;
       lastPromptNotice = undefined;
+      promptNames = { automatic: [], pinned: [] };
       unsupportedSession = ctx.sessionManager
         .getBranch()
         .some(
@@ -142,6 +151,7 @@ export function createSkillRouterExtension(
     pi.on("session_shutdown", () => credentials.clear());
     pi.on("before_agent_start", async (event, ctx) => {
       lastPromptNotice = undefined;
+      promptNames = { automatic: [], pinned: [] };
       const skills = event.systemPromptOptions.skills;
       const tools = event.systemPromptOptions.selectedTools;
       const hidden = event.systemPromptOptions.hiddenTools;
@@ -343,6 +353,22 @@ export function createSkillRouterExtension(
             }
           : {}),
       };
+      // Use the existing request snapshot and object identities; do not resolve paths again.
+      const fixed = new Set(pinned);
+      const visible = reader
+        ? result.skills.filter((skill) => !skill.disableModelInvocation)
+        : [];
+      promptNames = {
+        automatic:
+          promptStatus.mode === "filtered"
+            ? visible
+                .filter((skill) => !fixed.has(skill))
+                .map((skill) => skill.name)
+            : [],
+        pinned: visible
+          .filter((skill) => fixed.has(skill))
+          .map((skill) => skill.name),
+      };
       lastReport = result.report;
       dependencies.onReport?.(lastReport);
       pi.appendEntry("jev-skill-router", lastReport);
@@ -361,7 +387,7 @@ export function createSkillRouterExtension(
         expectedMetadata,
       );
       showPromptStatus(ctx);
-      const summary = formatSkillPromptStatus(promptStatus);
+      const summary = formatSkillPromptStatus(promptStatus, promptNames);
       if (summary !== lastPromptNotice) {
         lastPromptNotice = summary;
         pi.appendEntry("jev-skill-prompt", promptStatus);
@@ -402,7 +428,7 @@ export function createSkillRouterExtension(
       handler: async (_args, ctx) => {
         ctx.ui.notify(
           [
-            formatSkillPromptStatus(promptStatus),
+            formatSkillPromptStatus(promptStatus, promptNames),
             lastReport
               ? JSON.stringify(lastReport, null, 2)
               : "No routing result in this session.",

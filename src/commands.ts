@@ -9,6 +9,7 @@ import type { LoadedConfig } from "./config.ts";
 import type { JevCredentials } from "./credentials.ts";
 import {
   formatSkillPromptStatus,
+  type SkillPromptNames,
   type SkillPromptStatus,
 } from "./prompt-status.ts";
 import type { RouteReport } from "./router.ts";
@@ -53,6 +54,7 @@ export function registerJevSkillCommand(
     configuration: (cwd: string) => LoadedConfig;
     getReport: () => RouteReport | undefined;
     getPromptStatus: () => SkillPromptStatus;
+    getPromptNames: () => SkillPromptNames;
   },
 ): void {
   pi.registerCommand("jev-skill", {
@@ -124,7 +126,10 @@ export function registerJevSkillCommand(
         const report = options.getReport();
         notify(
           [
-            formatSkillPromptStatus(options.getPromptStatus()),
+            formatSkillPromptStatus(
+              options.getPromptStatus(),
+              options.getPromptNames(),
+            ),
             `API key：${source === "environment" ? "已配置（环境变量 TYPESAFE_API_KEY）" : source === "file" ? "已配置（用户凭据文件）" : "未配置；运行 /jev-skill apikey 填写"}`,
             `凭据路径：${options.credentials.filePath}`,
             ...(options.credentials.hasStorageError()
